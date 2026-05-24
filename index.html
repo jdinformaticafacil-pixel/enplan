@@ -45,7 +45,7 @@ function calcScore(lugar, uLat, uLng, radioM, activeTags) {
   if (activeTags.includes('WiFi') && lugar.services?.wifi) filtScore += 10;
   if (activeTags.includes('Aparcamiento') && lugar.services?.parking) filtScore += 10;
   filtScore = Math.min(100, filtScore);
-  const total = Math.round(proxScore*0.40 + ratingScore*0.30 + revScore*0.15 + filtScore*0.15);
+  const total = Math.round(proxScore*0.70 + ratingScore*0.20 + revScore*0.05 + filtScore*0.05);
   return { ...lugar, _distM: Math.round(distM), _scores:{prox:Math.round(proxScore),rating:Math.round(ratingScore),rev:Math.round(revScore),filt:Math.round(filtScore)}, _total:total };
 }
 
@@ -136,11 +136,29 @@ window.doSearch = async function() {
 
   try {
     let uLat, uLng;
+    // Usar coordenadas ya detectadas al cargar si están disponibles
+    if (window._userLat && window._userLng) {
+      uLat = window._userLat;
+      uLng = window._userLng;
+    }
     try {
-      const pos = await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000}));
-      uLat = pos.coords.latitude;
-      uLng = pos.coords.longitude;
-      document.getElementById('loc-current-val').innerHTML = '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> Mi ubicación';
+      if (!uLat || !uLng) {
+        const pos = await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000}));
+        uLat = pos.coords.latitude;
+        uLng = pos.coords.longitude;
+        window._userLat = uLat;
+        window._userLng = uLng;
+      }
+      try {
+        const geoRes = await fetch('https://nominatim.openstreetmap.org/reverse?lat='+uLat+'&lon='+uLng+'&format=json&accept-language=es');
+        const geoData = await geoRes.json();
+        const zona = geoData.address?.suburb || geoData.address?.neighbourhood || geoData.address?.city_district || '';
+        const ciudad = geoData.address?.city || geoData.address?.town || '';
+        const linea2 = zona && zona !== ciudad ? zona+', '+ciudad : ciudad;
+        document.getElementById('loc-current-val').innerHTML = '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg><span style="display:flex;flex-direction:column;line-height:1.3"><span>Mi ubicación</span><span style="font-size:10px;font-weight:300;color:#8a6e3a">'+linea2+'</span></span>';
+      } catch(e) {
+        document.getElementById('loc-current-val').innerHTML = '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> Mi ubicación';
+      }
     } catch {
       // Fallback: centro de Terrassa
       uLat = 41.5628; uLng = 2.0089;
@@ -163,7 +181,7 @@ window.doSearch = async function() {
 :root {
   --white: #ffffff; --off: #f8f7f5; --off2: #f2f0ec;
   --border: #e8e4de; --border2: #d8d3cb;
-  --text: #1a1814; --text-mid: #6b6560; --text-light: #a8a09a;
+  --text: #1e3a5f; --text-mid: #6b6560; --text-light: #a8a09a;
   --accent2: #c8a96e; --accent2-dim: rgba(200,169,110,0.12);
   --green: #4a9e6e; --red: #c0574a;
   --shadow-sm: 0 1px 4px rgba(0,0,0,0.06);
@@ -590,6 +608,38 @@ function closeSettings() {
 // Init
 renderChips();
 renderPanel();
+
+// Pedir GPS al cargar la página
+window.addEventListener('load', () => {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const uLat = pos.coords.latitude;
+      const uLng = pos.coords.longitude;
+      window._userLat = uLat;
+      window._userLng = uLng;
+      try {
+        const geoRes = await fetch('https://nominatim.openstreetmap.org/reverse?lat='+uLat+'&lon='+uLng+'&format=json&accept-language=es');
+        const geoData = await geoRes.json();
+        const zona = geoData.address?.suburb || geoData.address?.neighbourhood || geoData.address?.city_district || '';
+        const ciudad = geoData.address?.city || geoData.address?.town || '';
+        const linea2 = zona && zona !== ciudad ? zona+', '+ciudad : ciudad;
+        document.getElementById('loc-current-val').innerHTML =
+          '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>'
+          + '<span style="display:flex;flex-direction:column;line-height:1.3"><span>Mi ubicación</span>'
+          + '<span style="font-size:10px;font-weight:300;color:#8a6e3a">' + linea2 + '</span></span>';
+      } catch(e) {
+        document.getElementById('loc-current-val').innerHTML =
+          '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> Mi ubicación';
+      }
+    },
+    () => {
+      document.getElementById('loc-current-val').innerHTML =
+        '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#a8a09a" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#a8a09a" stroke-width="1.5" fill="none"/></svg> No detectada';
+    },
+    { timeout: 10000 }
+  );
+});
 </script>
 </body>
 </html>
