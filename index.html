@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Enplan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK (módulos ES) -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDy_oCVki1q6MPZ9h8RJjtMB-H8RmD8_lE",
+  authDomain: "enplan-69189.firebaseapp.com",
+  projectId: "enplan-69189",
+  storageBucket: "enplan-69189.firebasestorage.app",
+  messagingSenderId: "463560008561",
+  appId: "1:463560008561:web:46b95097a0b68b8b048cd0"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// Haversine — distancia en metros
+function haversine(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const dLat = (lat2-lat1)*Math.PI/180;
+  const dLng = (lng2-lng1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R*2*Math.asin(Math.sqrt(a));
+}
+
+// Scoring
+function calcScore(lugar, uLat, uLng, radioM, activeTags) {
+  const distM = haversine(uLat, uLng, lugar.lat, lugar.lng);
+  if (distM > radioM) return null;
+  const proxScore   = Math.max(0, 100 - (distM/radioM)*100);
+  const ratingScore = lugar.rating ? (lugar.rating/5)*100 : 50;
+  const revScore    = lugar.reviews ? Math.min(100,(lugar.reviews/500)*100) : 40;
+  let filtScore = 70;
+  if (activeTags.includes('Accesible') && lugar.services?.accesible) filtScore += 10;
+  if (activeTags.includes('WiFi') && lugar.services?.wifi) filtScore += 10;
+  if (activeTags.includes('Aparcamiento') && lugar.services?.parking) filtScore += 10;
+  filtScore = Math.min(100, filtScore);
+  const total = Math.round(proxScore*0.40 + ratingScore*0.30 + revScore*0.15 + filtScore*0.15);
+  return { ...lugar, _distM: Math.round(distM), _scores:{prox:Math.round(proxScore),rating:Math.round(ratingScore),rev:Math.round(revScore),filt:Math.round(filtScore)}, _total:total };
+}
+
+// Consulta Firestore
+async function buscarLugares(categoria, uLat, uLng, radioM, activeTags) {
+  const q = query(collection(db,"places"), where("category","==",categoria));
+  const snap = await getDocs(q);
+  const scored = [];
+  snap.forEach(doc => {
+    const r = calcScore(doc.data(), uLat, uLng, radioM, activeTags);
+    if (r) scored.push(r);
+  });
+  scored.sort((a,b) => b._total - a._total);
+  return scored.slice(0,3);
+}
+
+function fmtDist(m) { return m>=1000?(m/1000).toFixed(1)+' km':m+' m'; }
+
+function getActiveTags() {
+  return [...document.querySelectorAll('.extra-tag.active')].map(el=>el.textContent.trim());
+}
+
+function renderResultados(lugares, radioM) {
+  const catLabel = window._catLabel || 'Lugar';
+  if (lugares.length === 0) {
+    document.getElementById('results-heading').innerHTML = 'Sin resultados <em>cercanos</em>';
+    document.getElementById('results-sub').textContent = 'Prueba a aumentar el radio';
+    document.getElementById('card-best').style.display = 'none';
+    document.getElementById('results').classList.add('visible');
+    return;
+  }
+  document.getElementById('card-best').style.display = 'block';
+  document.getElementById('bd-price-row').style.display = 'none';
+  document.getElementById('price-wrap').style.display = 'none';
+  document.getElementById('btn-main-action').textContent = 'Ver en mapa';
+  document.getElementById('results-heading').innerHTML = 'La mejor <em>opción</em>';
+  document.getElementById('results-sub').textContent = catLabel+' · '+(radioM>=1000?(radioM/1000).toFixed(1)+'km':radioM+'m');
+
+  const best = lugares[0];
+  document.getElementById('score-num').textContent = best._total;
+  document.getElementById('best-name').textContent = best.name;
+  document.getElementById('best-type').textContent = best.categoryLabel || catLabel;
+  document.getElementById('best-stars').textContent = best.rating ? '★'.repeat(Math.round(best.rating))+' '+best.rating : '★★★★ —';
+  document.getElementById('best-dist').textContent = fmtDist(best._distM);
+  document.getElementById('best-reviews').textContent = best.reviews ? best.reviews.toLocaleString('es') : '—';
+  document.getElementById('best-address').textContent = best.address ? '📍 '+best.address : '📍 Terrassa';
+  const tagsEl = document.getElementById('best-tags');
+  tagsEl.innerHTML = (best.tags||[]).length
+    ? (best.tags).map(t=>`<span class="tag-p">${t}</span>`).join('')
+    : '<span class="tag-p">OpenStreetMap</span>';
+  document.getElementById('best-open').innerHTML = '<div class="open-dot open"></div> Datos verificados';
+  document.getElementById('btn-main-action').href = `https://www.openstreetmap.org/?mlat=${best.lat}&mlon=${best.lng}&zoom=18`;
+
+  ['bf-rating','bf-prox','bf-price','bf-rev','bf-filt'].forEach(id=>document.getElementById(id).style.width='0%');
+  setTimeout(()=>{
+    document.getElementById('bf-rating').style.width=best._scores.rating+'%'; document.getElementById('bn-rating').textContent=best._scores.rating;
+    document.getElementById('bf-prox').style.width=best._scores.prox+'%'; document.getElementById('bn-prox').textContent=best._scores.prox;
+    document.getElementById('bf-rev').style.width=best._scores.rev+'%'; document.getElementById('bn-rev').textContent=best._scores.rev;
+    document.getElementById('bf-filt').style.width=best._scores.filt+'%'; document.getElementById('bn-filt').textContent=best._scores.filt;
+  },150);
+
+  [1,2].forEach(i=>{
+    const alt = lugares[i];
+    if (!alt) { document.getElementById(`alt${i}-name`).textContent='—'; document.getElementById(`alt${i}-type`).textContent='Sin más resultados'; return; }
+    document.getElementById(`alt${i}-name`).textContent = alt.name;
+    document.getElementById(`alt${i}-type`).textContent = alt.categoryLabel || catLabel;
+    document.getElementById(`alt${i}-v1`).textContent = alt.rating ? '★ '+alt.rating : '★ —';
+    document.getElementById(`alt${i}-l1`).textContent = 'Rating';
+    document.getElementById(`alt${i}-v2`).textContent = fmtDist(alt._distM);
+    document.getElementById(`alt${i}-l2`).textContent = 'Distancia';
+    document.getElementById(`alt${i}-open`).innerHTML = '<div class="open-dot open"></div> Verificado';
+  });
+
+  const r = document.getElementById('results');
+  r.classList.add('visible');
+  setTimeout(()=>r.scrollIntoView({behavior:'smooth',block:'start'}),100);
+}
+
+// Función global llamada por el botón
+window.doSearch = async function() {
+  const btn = document.getElementById('search-btn');
+  btn.classList.add('loading');
+  btn.innerHTML = '<span class="spinner"></span>Buscando…';
+
+  const categoria  = window._serviceCat || 'restaurant';
+  const radioM     = window._radius     || 1000;
+  const activeTags = getActiveTags();
+
+  try {
+    let uLat, uLng;
+    try {
+      const pos = await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000}));
+      uLat = pos.coords.latitude;
+      uLng = pos.coords.longitude;
+      document.getElementById('loc-current-val').innerHTML = '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> Mi ubicación';
+    } catch {
+      // Fallback: centro de Terrassa
+      uLat = 41.5628; uLng = 2.0089;
+      document.getElementById('loc-current-val').innerHTML = '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#a8a09a" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#a8a09a" stroke-width="1.5" fill="none"/></svg> Terrassa (aprox.)';
+    }
+    const lugares = await buscarLugares(categoria, uLat, uLng, radioM, activeTags);
+    renderResultados(lugares, radioM);
+  } catch(err) {
+    console.error(err);
+    alert('Error al buscar. Comprueba tu conexión.');
+  } finally {
+    btn.classList.remove('loading');
+    btn.innerHTML = 'Encontrar el mejor';
+  }
+};
+</script>
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --white: #ffffff; --off: #f8f7f5; --off2: #f2f0ec;
+  --border: #e8e4de; --border2: #d8d3cb;
+  --text: #1a1814; --text-mid: #6b6560; --text-light: #a8a09a;
+  --accent2: #c8a96e; --accent2-dim: rgba(200,169,110,0.12);
+  --green: #4a9e6e; --red: #c0574a;
+  --shadow-sm: 0 1px 4px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 20px rgba(0,0,0,0.08);
+  --shadow-lg: 0 12px 48px rgba(0,0,0,0.10);
+  --r: 16px; --r-sm: 10px;
+}
+html { scroll-behavior: smooth; }
+body { background: var(--off); color: var(--text); font-family: 'Outfit', sans-serif; font-weight: 300; min-height: 100dvh; -webkit-font-smoothing: antialiased; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+.app { max-width: 460px; margin: 0 auto; padding: 0 18px 60px; }
+header { padding: 48px 0 32px; display: flex; align-items: flex-start; justify-content: space-between; }
+.wordmark { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 30px; letter-spacing: -0.5px; color: var(--text); line-height: 1; }
+.wordmark em { font-style: italic; color: var(--accent2); }
+.wordmark-sub { font-size: 10px; font-weight: 400; letter-spacing: 3px; text-transform: uppercase; color: var(--text-light); margin-top: 5px; }
+.header-actions { display: flex; gap: 10px; align-items: center; }
+.icon-btn { width: 40px; height: 40px; border-radius: 50%; background: var(--white); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s ease; box-shadow: var(--shadow-sm); }
+.icon-btn:hover { border-color: var(--border2); box-shadow: var(--shadow-md); }
+.icon-btn svg { width: 18px; height: 18px; stroke: var(--text-mid); }
+.mode-switch { display: grid; grid-template-columns: 1fr 1fr; background: var(--white); border: 1px solid var(--border); border-radius: 14px; padding: 5px; margin-bottom: 24px; box-shadow: var(--shadow-sm); }
+.mode-tab { padding: 11px; text-align: center; border-radius: 10px; cursor: pointer; transition: all 0.25s ease; font-size: 12px; font-weight: 400; letter-spacing: 0.3px; color: var(--text-mid); display: flex; align-items: center; justify-content: center; gap: 7px; }
+.mode-tab .mode-icon { font-size: 16px; }
+.mode-tab.active { background: var(--text); color: var(--white); box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+.loc-section { margin-bottom: 22px; }
+.section-label { font-size: 9px; font-weight: 500; letter-spacing: 3px; text-transform: uppercase; color: var(--text-light); margin-bottom: 10px; }
+.loc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.loc-card { background: var(--white); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px; cursor: pointer; transition: all 0.2s ease; box-shadow: var(--shadow-sm); }
+.loc-card:hover { border-color: var(--border2); }
+.loc-card.active { border-color: var(--accent2); background: var(--accent2-dim); }
+.loc-card-label { font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-light); margin-bottom: 5px; }
+.loc-card-val { font-family: 'Outfit', sans-serif; font-weight: 500; font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.loc-card.active .loc-card-val { color: #8a6e3a; }
+.dest-input-wrap { display: none; margin-top: 8px; }
+.dest-input { width: 100%; background: var(--white); border: 1.5px solid var(--accent2); border-radius: var(--r-sm); padding: 12px 16px; font-family: 'Outfit', sans-serif; font-size: 13px; color: var(--text); outline: none; }
+.cat-section { margin-bottom: 22px; }
+.cat-scroll { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+.cat-scroll::-webkit-scrollbar { display: none; }
+.cat-chip { background: var(--white); border: 1px solid var(--border); border-radius: 40px; padding: 9px 16px; white-space: nowrap; cursor: pointer; transition: all 0.2s ease; display: flex; align-items: center; gap: 7px; box-shadow: var(--shadow-sm); font-size: 12px; color: var(--text-mid); }
+.cat-chip:hover { border-color: var(--border2); }
+.cat-chip.active { background: var(--text); border-color: var(--text); color: var(--white); box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+.cat-chip .chip-icon { font-size: 15px; }
+.product-search-wrap { margin-bottom: 18px; }
+.product-input { width: 100%; background: var(--white); border: 1.5px solid var(--border); border-radius: var(--r); padding: 16px 20px; font-family: 'Outfit', sans-serif; font-size: 14px; color: var(--text); outline: none; box-shadow: var(--shadow-sm); transition: border-color 0.2s; }
+.product-input:focus { border-color: var(--accent2); }
+.product-input::placeholder { color: var(--text-light); }
+.radius-row { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; background: var(--white); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 18px; box-shadow: var(--shadow-sm); }
+.radius-lbl { font-size: 11px; color: var(--text-light); letter-spacing: 1px; text-transform: uppercase; white-space: nowrap; }
+input[type=range] { flex: 1; -webkit-appearance: none; appearance: none; height: 2px; background: var(--border); border-radius: 2px; outline: none; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: var(--text); cursor: pointer; border: 3px solid var(--white); box-shadow: 0 1px 4px rgba(0,0,0,0.2); }
+.radius-val { font-family: 'Outfit', sans-serif; font-weight: 500; font-size: 13px; color: var(--text); min-width: 44px; text-align: right; }
+.tags-row { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 24px; }
+.extra-tag { background: var(--white); border: 1px solid var(--border); border-radius: 20px; padding: 7px 13px; font-size: 11px; color: var(--text-mid); cursor: pointer; transition: all 0.2s ease; white-space: nowrap; box-shadow: var(--shadow-sm); }
+.extra-tag:hover { border-color: var(--border2); }
+.extra-tag.active { border-color: var(--accent2); color: #8a6e3a; background: var(--accent2-dim); }
+.search-btn { width: 100%; padding: 17px; background: var(--text); color: var(--white); border: none; border-radius: var(--r); font-family: 'Outfit', sans-serif; font-weight: 500; font-size: 14px; letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer; transition: all 0.22s ease; box-shadow: 0 4px 18px rgba(0,0,0,0.18); margin-bottom: 32px; }
+.search-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(0,0,0,0.22); }
+.search-btn:active { transform: translateY(0); }
+.search-btn.loading { opacity: 0.7; pointer-events: none; }
+.spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 8px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.results { display: none; }
+.results.visible { display: block; animation: fadeIn 0.3s ease; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+.results-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 18px; }
+.results-heading { font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 500; letter-spacing: -0.3px; color: var(--text); }
+.results-heading em { font-style: italic; color: var(--accent2); }
+.results-sub { font-size: 11px; color: var(--text-light); }
+.card-best { background: var(--white); border-radius: 20px; padding: 26px; margin-bottom: 12px; box-shadow: var(--shadow-lg); border: 1px solid var(--border); animation: slideUp 0.4s cubic-bezier(.4,0,.2,1) both; position: relative; overflow: hidden; }
+.card-best::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, var(--accent2), #e8c07e, var(--accent2)); }
+.best-badge { display: inline-flex; align-items: center; gap: 5px; background: var(--accent2-dim); color: #8a6e3a; border: 1px solid rgba(200,169,110,0.3); border-radius: 6px; padding: 4px 10px; font-size: 10px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 16px; }
+.score-pill { float: right; margin: 0 0 12px 14px; background: var(--text); color: var(--white); border-radius: 50px; padding: 8px 14px; font-family: 'Outfit', sans-serif; font-weight: 600; font-size: 18px; line-height: 1; display: flex; flex-direction: column; align-items: center; }
+.score-pill .score-sub { font-size: 8px; font-weight: 400; letter-spacing: 1px; text-transform: uppercase; color: rgba(255,255,255,0.5); margin-top: 3px; }
+.place-name { font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 26px; letter-spacing: -0.5px; line-height: 1.1; margin-bottom: 5px; color: var(--text); }
+.place-type { font-size: 11px; color: var(--text-light); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 20px; }
+.metrics-row { display: flex; gap: 24px; margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
+.metric { display: flex; flex-direction: column; gap: 2px; }
+.metric-val { font-family: 'Outfit', sans-serif; font-weight: 500; font-size: 18px; color: var(--text); }
+.metric-stars { font-size: 14px; color: var(--accent2); }
+.metric-lbl { font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-light); }
+.place-address { font-size: 12px; color: var(--text-mid); margin-bottom: 14px; line-height: 1.5; }
+.tags-place { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+.tag-p { background: var(--off); border: 1px solid var(--border); border-radius: 20px; padding: 4px 11px; font-size: 10px; color: var(--text-mid); }
+.open-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-mid); margin-bottom: 18px; }
+.open-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.open-dot.open { background: var(--green); }
+.open-dot.closed { background: var(--red); }
+.breakdown { padding-top: 16px; border-top: 1px solid var(--border); margin-bottom: 18px; }
+.bd-row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+.bd-label { font-size: 10px; color: var(--text-light); text-transform: uppercase; letter-spacing: 1px; width: 72px; flex-shrink: 0; }
+.bd-track { flex: 1; height: 3px; background: var(--off2); border-radius: 2px; overflow: hidden; }
+.bd-fill { height: 100%; background: var(--accent2); border-radius: 2px; transition: width 0.9s cubic-bezier(.4,0,.2,1); }
+.bd-num { font-size: 11px; font-weight: 500; color: var(--text-mid); width: 22px; text-align: right; }
+.price-badge { display: inline-flex; align-items: baseline; gap: 4px; background: var(--text); color: var(--white); border-radius: 8px; padding: 8px 14px; font-family: 'Outfit', sans-serif; margin-bottom: 16px; flex-wrap: wrap; }
+.price-amount { font-weight: 600; font-size: 22px; letter-spacing: -0.5px; }
+.price-orig { font-size: 12px; color: rgba(255,255,255,0.4); text-decoration: line-through; margin-left: 6px; }
+.price-save { background: var(--green); color: white; font-size: 10px; font-weight: 500; padding: 3px 8px; border-radius: 4px; margin-left: 8px; }
+.card-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.btn-a { padding: 12px; border-radius: var(--r-sm); font-family: 'Outfit', sans-serif; font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.2s; text-align: center; text-decoration: none; display: block; border: none; }
+.btn-dark { background: var(--text); color: var(--white); }
+.btn-dark:hover { opacity: 0.88; }
+.btn-outline { background: transparent; border: 1.5px solid var(--border); color: var(--text-mid); }
+.btn-outline:hover { border-color: var(--border2); color: var(--text); }
+.alts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.card-alt { background: var(--white); border: 1px solid var(--border); border-radius: var(--r); padding: 18px; box-shadow: var(--shadow-sm); cursor: pointer; transition: all 0.2s ease; animation: slideUp 0.4s cubic-bezier(.4,0,.2,1) both; }
+.card-alt:first-child { animation-delay: 0.08s; }
+.card-alt:last-child { animation-delay: 0.16s; }
+.card-alt:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+.alt-badge { font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-light); margin-bottom: 10px; display: block; }
+.alt-name { font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 17px; color: var(--text); margin-bottom: 4px; line-height: 1.2; }
+.alt-type { font-size: 10px; color: var(--text-light); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+.alt-metrics { display: flex; gap: 12px; margin-bottom: 10px; }
+.alt-m { display: flex; flex-direction: column; gap: 2px; }
+.alt-val { font-weight: 500; font-size: 15px; color: var(--text); }
+.alt-lbl { font-size: 9px; color: var(--text-light); letter-spacing: 1px; text-transform: uppercase; }
+.overlay { display: none; position: fixed; inset: 0; background: rgba(26,24,20,0.4); z-index: 100; backdrop-filter: blur(3px); }
+.overlay.open { display: block; animation: fadeIn 0.2s ease; }
+.settings-panel { position: fixed; bottom: 0; left: 0; right: 0; max-height: 90dvh; background: var(--white); border-radius: 24px 24px 0 0; z-index: 101; transform: translateY(100%); transition: transform 0.35s cubic-bezier(.4,0,.2,1); overflow: hidden; display: flex; flex-direction: column; }
+.settings-panel.open { transform: translateY(0); }
+.panel-handle { width: 36px; height: 4px; background: var(--border); border-radius: 4px; margin: 14px auto 0; flex-shrink: 0; }
+.panel-header { padding: 20px 24px 16px; display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.panel-title { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 22px; color: var(--text); }
+.panel-close { font-size: 12px; color: var(--text-light); cursor: pointer; letter-spacing: 1px; text-transform: uppercase; padding: 4px 8px; border-radius: 6px; transition: background 0.2s; }
+.panel-close:hover { background: var(--off); }
+.panel-body { overflow-y: auto; padding: 20px 24px 36px; flex: 1; }
+.panel-section { margin-bottom: 28px; }
+.panel-section-title { font-size: 10px; font-weight: 500; letter-spacing: 3px; text-transform: uppercase; color: var(--text-light); margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.service-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.service-item { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: var(--off); border: 1.5px solid transparent; border-radius: 12px; cursor: pointer; transition: all 0.2s ease; }
+.service-item:hover { background: var(--off2); }
+.service-item.selected { background: var(--accent2-dim); border-color: rgba(200,169,110,0.4); }
+.service-icon { font-size: 18px; flex-shrink: 0; }
+.service-name { font-size: 12px; color: var(--text-mid); font-weight: 400; line-height: 1.2; }
+.service-item.selected .service-name { color: #7a5f2a; font-weight: 500; }
+.service-check { margin-left: auto; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--border2); display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.2s; }
+.service-item.selected .service-check { background: var(--accent2); border-color: var(--accent2); }
+.service-item.selected .service-check::after { content: ''; width: 5px; height: 5px; background: white; border-radius: 50%; }
+.panel-save-btn { width: 100%; padding: 15px; background: var(--text); color: var(--white); border: none; border-radius: var(--r); font-family: 'Outfit', sans-serif; font-weight: 500; font-size: 13px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer; margin-top: 8px; transition: opacity 0.2s; }
+.panel-save-btn:hover { opacity: 0.88; }
+.services-section { display: none; }
+.services-section.visible { display: block; }
+.articles-section { display: none; }
+.articles-section.visible { display: block; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div>
+      <div class="wordmark">En<em>plan</em></div>
+      <div class="wordmark-sub">Encuentra tu plan, siempre</div>
+    </div>
+    <div class="header-actions">
+      <div class="icon-btn" onclick="openSettings()" title="Configuración">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </div>
+    </div>
+  </header>
+
+  <div class="mode-switch">
+    <div class="mode-tab active" id="tab-services" onclick="setMode('services')"><span class="mode-icon">📍</span> Lugares y servicios</div>
+    <div class="mode-tab" id="tab-articles" onclick="setMode('articles')"><span class="mode-icon">🛍️</span> Artículos y precio</div>
+  </div>
+
+  <div class="loc-section">
+    <div class="section-label">Ubicación</div>
+    <div class="loc-grid">
+      <div class="loc-card active" id="loc-current">
+        <div class="loc-card-label">Actual</div>
+        <div class="loc-card-val" id="loc-current-val">
+          <svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>
+          Detectando…
+        </div>
+      </div>
+      <div class="loc-card" id="loc-dest" onclick="toggleDestInput()">
+        <div class="loc-card-label">Destino</div>
+        <div class="loc-card-val" id="loc-dest-val">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1v10M1 6h10" stroke="#a8a09a" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Fijar destino
+        </div>
+      </div>
+    </div>
+    <div class="dest-input-wrap" id="dest-input-wrap">
+      <input class="dest-input" id="dest-input" type="text" placeholder="Ciudad, barrio o dirección…"
+        onkeydown="if(event.key==='Enter')confirmDest(this.value)">
+    </div>
+  </div>
+
+  <div class="services-section visible" id="services-section">
+    <div class="cat-section">
+      <div class="section-label">Categoría</div>
+      <div class="cat-scroll" id="cat-scroll"></div>
+    </div>
+    <div class="radius-row">
+      <span class="radius-lbl">Radio</span>
+      <input type="range" id="radius-slider" min="200" max="10000" step="100" value="1000" oninput="updateRadius(this.value)">
+      <span class="radius-val" id="radius-val">1 km</span>
+    </div>
+    <div class="section-label">Filtros</div>
+    <div class="tags-row">
+      <div class="extra-tag active" onclick="toggleExtra(this)">Abierto ahora</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Alta valoración</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Accesible</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Aparcamiento</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Acepta tarjeta</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">WiFi</div>
+    </div>
+  </div>
+
+  <div class="articles-section" id="articles-section">
+    <div class="product-search-wrap">
+      <div class="section-label">¿Qué artículo buscas?</div>
+      <input class="product-input" type="text" placeholder="Ej: Nike Air Max 90 talla 42, Samsung Galaxy S25…">
+    </div>
+    <div class="cat-section">
+      <div class="section-label">Categoría</div>
+      <div class="cat-scroll">
+        <div class="cat-chip active"><span class="chip-icon">📱</span>Electrónica</div>
+        <div class="cat-chip"><span class="chip-icon">👟</span>Calzado</div>
+        <div class="cat-chip"><span class="chip-icon">👕</span>Ropa</div>
+        <div class="cat-chip"><span class="chip-icon">🎸</span>Música</div>
+        <div class="cat-chip"><span class="chip-icon">🎮</span>Gaming</div>
+        <div class="cat-chip"><span class="chip-icon">📖</span>Libros</div>
+        <div class="cat-chip"><span class="chip-icon">⚽</span>Deporte</div>
+        <div class="cat-chip"><span class="chip-icon">🏠</span>Hogar</div>
+      </div>
+    </div>
+    <div class="radius-row">
+      <span class="radius-lbl">Radio búsqueda</span>
+      <input type="range" min="500" max="50000" step="500" value="5000" oninput="document.getElementById('art-radius-val').textContent=this.value>=1000?(this.value/1000).toFixed(1)+' km':this.value+' m'">
+      <span class="radius-val" id="art-radius-val">5 km</span>
+    </div>
+    <div class="section-label">Preferencia</div>
+    <div class="tags-row">
+      <div class="extra-tag active" onclick="toggleExtra(this)">Mejor precio</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Stock disponible</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Tienda física</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Online también</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Envío gratis</div>
+      <div class="extra-tag" onclick="toggleExtra(this)">Garantía oficial</div>
+    </div>
+  </div>
+
+  <button class="search-btn" id="search-btn" onclick="doSearch()">Encontrar el mejor</button>
+
+  <div class="results" id="results">
+    <div class="results-header">
+      <div class="results-heading" id="results-heading">La mejor <em>opción</em></div>
+      <div class="results-sub" id="results-sub">—</div>
+    </div>
+    <div class="card-best" id="card-best">
+      <div class="best-badge">⭐ Mejor opción</div>
+      <div class="score-pill"><span id="score-num">—</span><span class="score-sub">Score</span></div>
+      <div class="place-name" id="best-name">—</div>
+      <div class="place-type" id="best-type">—</div>
+      <div id="price-wrap" style="display:none;">
+        <div class="price-badge">
+          <span class="price-amount" id="price-amount">—</span>
+          <span id="price-orig" class="price-orig" style="display:none;"></span>
+          <span id="price-save" class="price-save" style="display:none;"></span>
+        </div>
+      </div>
+      <div class="metrics-row">
+        <div class="metric"><span class="metric-stars" id="best-stars">—</span><span class="metric-lbl">Valoración</span></div>
+        <div class="metric"><span class="metric-val" id="best-dist">—</span><span class="metric-lbl">Distancia</span></div>
+        <div class="metric"><span class="metric-val" id="best-reviews">—</span><span class="metric-lbl">Reseñas</span></div>
+      </div>
+      <div class="place-address" id="best-address">—</div>
+      <div class="tags-place" id="best-tags"></div>
+      <div class="open-badge" id="best-open"><div class="open-dot open"></div> Abierto ahora</div>
+      <div class="breakdown">
+        <div class="bd-row"><span class="bd-label">Valoración</span><div class="bd-track"><div class="bd-fill" id="bf-rating" style="width:0%"></div></div><span class="bd-num" id="bn-rating">—</span></div>
+        <div class="bd-row"><span class="bd-label">Proximidad</span><div class="bd-track"><div class="bd-fill" id="bf-prox" style="width:0%"></div></div><span class="bd-num" id="bn-prox">—</span></div>
+        <div class="bd-row" id="bd-price-row"><span class="bd-label">Precio</span><div class="bd-track"><div class="bd-fill" id="bf-price" style="width:0%"></div></div><span class="bd-num" id="bn-price">—</span></div>
+        <div class="bd-row"><span class="bd-label">Reseñas</span><div class="bd-track"><div class="bd-fill" id="bf-rev" style="width:0%"></div></div><span class="bd-num" id="bn-rev">—</span></div>
+        <div class="bd-row"><span class="bd-label">Filtros</span><div class="bd-track"><div class="bd-fill" id="bf-filt" style="width:0%"></div></div><span class="bd-num" id="bn-filt">—</span></div>
+      </div>
+      <div class="card-actions">
+        <a class="btn-a btn-dark" id="btn-main-action" href="#" target="_blank">Ver en mapa</a>
+        <button class="btn-a btn-outline">Compartir</button>
+      </div>
+    </div>
+    <div class="alts-grid">
+      <div class="card-alt">
+        <span class="alt-badge">2ª opción</span>
+        <div class="alt-name" id="alt1-name">—</div>
+        <div class="alt-type" id="alt1-type">—</div>
+        <div class="alt-metrics">
+          <div class="alt-m"><span class="alt-val" id="alt1-v1">—</span><span class="alt-lbl" id="alt1-l1">Rating</span></div>
+          <div class="alt-m"><span class="alt-val" id="alt1-v2">—</span><span class="alt-lbl" id="alt1-l2">Distancia</span></div>
+        </div>
+        <div class="open-badge" id="alt1-open"><div class="open-dot open"></div> Verificado</div>
+      </div>
+      <div class="card-alt">
+        <span class="alt-badge">3ª opción</span>
+        <div class="alt-name" id="alt2-name">—</div>
+        <div class="alt-type" id="alt2-type">—</div>
+        <div class="alt-metrics">
+          <div class="alt-m"><span class="alt-val" id="alt2-v1">—</span><span class="alt-lbl" id="alt2-l1">Rating</span></div>
+          <div class="alt-m"><span class="alt-val" id="alt2-v2">—</span><span class="alt-lbl" id="alt2-l2">Distancia</span></div>
+        </div>
+        <div class="open-badge" id="alt2-open"><div class="open-dot open"></div> Verificado</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay" onclick="closeSettings()"></div>
+<div class="settings-panel" id="settings-panel">
+  <div class="panel-handle"></div>
+  <div class="panel-header">
+    <div class="panel-title">Configuración</div>
+    <div class="panel-close" onclick="closeSettings()">Cerrar</div>
+  </div>
+  <div class="panel-body">
+    <div class="panel-section"><div class="panel-section-title">Restauración y alimentación</div><div class="service-grid" id="sg-food"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Ocio y entretenimiento</div><div class="service-grid" id="sg-leisure"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Salud y deporte</div><div class="service-grid" id="sg-health"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Educación y cultura</div><div class="service-grid" id="sg-edu"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Servicios urbanos</div><div class="service-grid" id="sg-urban"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Comercios</div><div class="service-grid" id="sg-shops"></div></div>
+    <button class="panel-save-btn" onclick="saveSettings()">Guardar y aplicar</button>
+  </div>
+</div>
+
+<script>
+// Variables globales accesibles desde el módulo Firebase
+window._serviceCat = 'restaurant';
+window._radius     = 1000;
+window._catLabel   = 'Restaurante';
+
+const CAT = {
+  'sg-food':[{id:'restaurant',icon:'🍽️',name:'Restaurante'},{id:'cafe',icon:'☕',name:'Cafetería'},{id:'bakery',icon:'🥐',name:'Panadería'},{id:'bar',icon:'🍺',name:'Bar'}],
+  'sg-leisure':[{id:'nightclub',icon:'🎵',name:'Discoteca'},{id:'karaoke',icon:'🎤',name:'Karaoke'},{id:'cinema',icon:'🎬',name:'Cine'}],
+  'sg-health':[{id:'gym',icon:'🏋️',name:'Gimnasio'},{id:'pharmacy',icon:'💊',name:'Farmacia'},{id:'hospital',icon:'🏥',name:'Centro médico'}],
+  'sg-edu':[{id:'university',icon:'🎓',name:'Universidad'},{id:'library',icon:'📚',name:'Biblioteca'},{id:'museum',icon:'🏛️',name:'Museo'}],
+  'sg-urban':[{id:'gas',icon:'⛽',name:'Gasolinera'},{id:'hotel',icon:'🏨',name:'Hotel'},{id:'bank',icon:'🏦',name:'Banco / ATM'}],
+  'sg-shops':[{id:'supermarket',icon:'🛒',name:'Supermercado'},{id:'clothing',icon:'👗',name:'Tienda de ropa'}]
+};
+
+const activeServices = new Set(['restaurant','cafe','pharmacy','supermarket','gas','hotel','library','gym']);
+
+function renderChips() {
+  const all = Object.values(CAT).flat().filter(s => activeServices.has(s.id));
+  document.getElementById('cat-scroll').innerHTML = all.map((s,i) =>
+    `<div class="cat-chip ${i===0?'active':''}" data-cat="${s.id}" data-name="${s.name}" onclick="selectSvcCat(this)">
+      <span class="chip-icon">${s.icon}</span>${s.name}
+    </div>`
+  ).join('');
+  if (all.length) { window._serviceCat = all[0].id; window._catLabel = all[0].name; }
+}
+
+function renderPanel() {
+  Object.entries(CAT).forEach(([gid, items]) => {
+    document.getElementById(gid).innerHTML = items.map(s =>
+      `<div class="service-item ${activeServices.has(s.id)?'selected':''}" onclick="toggleSvc(this,'${s.id}')">
+        <span class="service-icon">${s.icon}</span>
+        <span class="service-name">${s.name}</span>
+        <div class="service-check"></div>
+      </div>`
+    ).join('');
+  });
+}
+
+function toggleSvc(el, id) {
+  el.classList.toggle('selected');
+  activeServices.has(id) ? activeServices.delete(id) : activeServices.add(id);
+}
+
+function saveSettings() { renderChips(); closeSettings(); }
+
+function setMode(m) {
+  document.getElementById('tab-services').classList.toggle('active', m==='services');
+  document.getElementById('tab-articles').classList.toggle('active', m==='articles');
+  document.getElementById('services-section').classList.toggle('visible', m==='services');
+  document.getElementById('articles-section').classList.toggle('visible', m==='articles');
+  document.getElementById('results').classList.remove('visible');
+}
+
+function toggleDestInput() {
+  const w = document.getElementById('dest-input-wrap');
+  w.style.display = w.style.display === 'block' ? 'none' : 'block';
+  if (w.style.display === 'block') document.getElementById('dest-input').focus();
+}
+
+function confirmDest(v) {
+  if (!v.trim()) return;
+  document.getElementById('loc-dest-val').innerHTML =
+    `<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> ${v.trim().substring(0,16)}`;
+  document.getElementById('loc-dest').classList.add('active');
+  document.getElementById('dest-input-wrap').style.display = 'none';
+}
+
+function selectSvcCat(el) {
+  document.querySelectorAll('#cat-scroll .cat-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  window._serviceCat = el.dataset.cat;
+  window._catLabel   = el.dataset.name;
+}
+
+function toggleExtra(el) { el.classList.toggle('active'); }
+
+function updateRadius(v) {
+  window._radius = parseInt(v);
+  document.getElementById('radius-val').textContent = v>=1000?(v/1000).toFixed(1)+' km':v+' m';
+}
+
+function openSettings() {
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('settings-panel').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeSettings() {
+  document.getElementById('overlay').classList.remove('open');
+  document.getElementById('settings-panel').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+// Init
+renderChips();
+renderPanel();
+</script>
+</body>
+</html>
