@@ -517,9 +517,9 @@ function renderGasolineras(items, radioM) {
   prEl.style.cssText = 'display:flex;flex-direction:column;gap:4px;padding:10px 14px;margin-bottom:12px;';
   prEl.innerHTML = precios.length
     ? precios.map(p =>
-        `<span style="display:flex;justify-content:space-between;font-size:13px;">
-          <span style="color:#6b6560">${p.label}</span>
-          <span style="font-weight:600;color:#1e3a5f">${p.val.toFixed(3)} €/L</span>
+        `<span style="display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:3px 0;border-bottom:1px solid #f2f0ec;">
+          <span style="color:#6b6560;font-weight:400">${p.label}</span>
+          <span style="font-weight:600;color:#1e3a5f;font-size:15px;margin-left:16px">${p.val.toFixed(3)} €/L</span>
         </span>`
       ).join('')
     : '<span style="font-size:12px;color:#a8a09a">Precios no disponibles</span>';
@@ -546,9 +546,16 @@ function renderGasolineras(items, radioM) {
     document.getElementById('alt'+i+'-name').textContent  = item.name;
     document.getElementById('alt'+i+'-type').textContent  = item.ciudad;
     document.getElementById('alt'+i+'-score').textContent = item._score;
-    const pRef = item.precio95 || item.precioDiesel;
-    document.getElementById('alt'+i+'-v1').textContent = pRef ? pRef.toFixed(3)+'€' : '—';
-    document.getElementById('alt'+i+'-l1').textContent = item.precio95 ? 'G95/L' : 'Diésel/L';
+    // Mostrar precios múltiples en alternativas
+    const preciosAlt = [];
+    if (item.precio95)     preciosAlt.push('G95: '+item.precio95.toFixed(3)+'€');
+    if (item.precio98)     preciosAlt.push('G98: '+item.precio98.toFixed(3)+'€');
+    if (item.precioDiesel) preciosAlt.push('GA: '+item.precioDiesel.toFixed(3)+'€');
+    document.getElementById('alt'+i+'-v1').innerHTML =
+      preciosAlt.length
+        ? preciosAlt.map(p=>`<span style="display:block;font-size:11px;font-weight:500">${p}</span>`).join('')
+        : '—';
+    document.getElementById('alt'+i+'-l1').textContent = 'Precios/L';
     document.getElementById('alt'+i+'-v2').textContent = item._distM>=1000?(item._distM/1000).toFixed(1)+' km':item._distM+' m';
     document.getElementById('alt'+i+'-l2').textContent = 'Distancia';
     const io = item._isOpen;
