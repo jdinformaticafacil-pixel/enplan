@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Enplan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+<!-- ══════════════════════════════════════════════════════
+     FIREBASE SDK
+     ══════════════════════════════════════════════════════ -->
+<script type="module">
+import { initializeApp }                                           from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, query, where, getDocs,
+         addDoc, serverTimestamp }                                 from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey:            "AIzaSyDy_oCVki1q6MPZ9h8RJjtMB-H8RmD8_lE",
+  authDomain:        "enplan-69189.firebaseapp.com",
+  projectId:         "enplan-69189",
+  storageBucket:     "enplan-69189.firebasestorage.app",
+  messagingSenderId: "463560008561",
+  appId:             "1:463560008561:web:46b95097a0b68b8b048cd0"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// ── Haversine ────────────────────────────────────────────
+function haversine(lat1,lng1,lat2,lng2) {
+  const R=6371000, dL=(lat2-lat1)*Math.PI/180, dG=(lng2-lng1)*Math.PI/180;
+  const a=Math.sin(dL/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dG/2)**2;
+  return R*2*Math.asin(Math.sqrt(a));
+}
+
+// ══════════════════════════════════════════════════════════
+//  ALGORITMO DE SCORING — LUGARES
+//  Lee pesos dinámicamente de los sliders del panel Filtros
+//  Añadir parámetro: 1) slider en HTML, 2) peso en getWeights(), 3) puntuación en calcScore()
+// ══════════════════════════════════════════════════════════
+function getWeights() {
+  const g = id => parseInt(document.getElementById(id)?.value||50);
+  return {
+    distancia:  g('w-distancia'),
+    calidad:    g('w-calidad'),
+    precio:     g('w-precio'),
+    resenas:    g('w-resenas'),
+    abierto:    g('w-abierto'),
+    accesible:  g('w-accesible'),
+    wifi:       g('w-wifi'),
+    parking:    g('w-parking'),
+    terraza:    g('w-terraza'),
+    tarjeta:    g('w-tarjeta'),
+    // Añadir nuevos pesos aquí
+  };
+}
+
+function calcScore(lugar, uLat, uLng, radioM) {
+  const distM = haversine(uLat,uLng,lugar.lat,lugar.lng);
+  if (distM > radioM) return null;
+
+  const W = getWeights();
+  const totalPeso = Object.values(W).reduce((a,b)=>a+b,0)||1;
+
+  // Puntuaciones individuales 0-100
+  const pDist      = Math.max(0,100-(distM/radioM)*100);
+  // Usar ratingCombined (Google + Enplan) si existe
+  const r          = lugar.ratingCombined || lugar.rating;
+  const pCalidad   = r ? (r/5)*100 : 50;
+  const pPrecio    = lugar.priceLevel ? Math.max(0,100-(lugar.priceLevel-1)*25) : 50;
+  const pResenas   = lugar.reviews ? Math.min(100,(lugar.reviews/500)*100) : 40;
+  const isOpen     = isOpenNow(lugar.hours);
+  const pAbierto   = isOpen===true?100:isOpen===false?10:50;
+  const pAccesible = lugar.services?.accesible?100:0;
+  const pWifi      = lugar.services?.wifi?100:0;
+  const pParking   = lugar.services?.parking?100:0;
+  const pTerraza   = lugar.services?.terraza?100:0;
+  const pTarjeta   = lugar.services?.tarjeta?100:0;
+  // Añadir nuevas puntuaciones aquí
+
+  const score = Math.round((
+    pDist*W.distancia + pCalidad*W.calidad + pPrecio*W.precio +
+    pResenas*W.resenas + pAbierto*W.abierto + pAccesible*W.accesible +
+    pWifi*W.wifi + pParking*W.parking + pTerraza*W.terraza + pTarjeta*W.tarjeta
+  )/totalPeso);
+
+  return {
+    ...lugar, _distM:Math.round(distM), _score:score, _isOpen:isOpen,
+    _bd:{ distancia:Math.round(pDist), calidad:Math.round(pCalidad),
+          precio:Math.round(pPrecio), resenas:Math.round(pResenas), abierto:Math.round(pAbierto) }
+  };
+}
+
+// ══════════════════════════════════════════════════════════
+//  ALGORITMO DE SCORING — ARTÍCULOS
+// ══════════════════════════════════════════════════════════
+function getWeightsArt() {
+  const g = id => parseInt(document.getElementById(id)?.value||50);
+  return {
+    precio:     g('wa-precio'),
+    stock:      g('wa-stock'),
+    distancia:  g('wa-distancia'),
+    garantia:   g('wa-garantia'),
+    envio:      g('wa-envio'),
+    valoracion: g('wa-valoracion'),
+  };
+}
+
+function calcScoreArt(art, uLat, uLng, radioM, texto) {
+  const t = texto.toLowerCase().trim();
+  if (t) {
+    const n=(art.name||'').toLowerCase(), b=(art.brand||'').toLowerCase();
+    if (!n.includes(t)&&!b.includes(t)) return null;
+  }
+  const W=getWeightsArt(), total=Object.values(W).reduce((a,b)=>a+b,0)||1;
+  let distM=99999;
+  if (art.lat&&art.lng&&uLat&&uLng) {
+    distM=haversine(uLat,uLng,art.lat,art.lng);
+    if (distM>radioM&&!art.onlineAvailable) return null;
+  }
+  const pPrecio    = art.price?Math.max(0,100-(art.price/1000)*50):50;
+  const pStock     = art.stock?100:0;
+  const pDist      = art.onlineAvailable?80:Math.max(0,100-(distM/radioM)*100);
+  const pGarantia  = art.warranty?100:30;
+  const pEnvio     = art.freeShipping?100:20;
+  const pValoracion= art.rating?(art.rating/5)*100:50;
+  const score=Math.round((pPrecio*W.precio+pStock*W.stock+pDist*W.distancia+
+    pGarantia*W.garantia+pEnvio*W.envio+pValoracion*W.valoracion)/total);
+  return {...art,_distM:Math.round(distM),_score:score,
+    _bd:{precio:Math.round(pPrecio),stock:Math.round(pStock),distancia:Math.round(pDist),garantia:Math.round(pGarantia)}};
+}
+
+// ── Horario ────────────────────────────────────────────────
+function isOpenNow(h) {
+  if (!h) return null;
+  if (h==='24/7') return true;
+  try {
+    const now=new Date(), day=['Su','Mo','Tu','We','Th','Fr','Sa'][now.getDay()];
+    const hhmm=now.getHours()*60+now.getMinutes();
+    for (const part of h.split(';')) {
+      if (!part.includes(day)&&!part.includes('Mo-Fr')&&!part.includes('Mo-Su')) continue;
+      const m=part.match(/(\d{2}):(\d{2})-(\d{2}):(\d{2})/);
+      if (m&&hhmm>=parseInt(m[1])*60+parseInt(m[2])&&hhmm<=parseInt(m[3])*60+parseInt(m[4])) return true;
+    }
+    return false;
+  } catch { return null; }
+}
+
+// ── Consultas Firestore ────────────────────────────────────
+async function buscarLugares(cat, uLat, uLng, radioM) {
+  const snap=await getDocs(query(collection(db,'places'),where('category','==',cat)));
+  const res=[];
+  snap.forEach(d=>{const r=calcScore(d.data(),uLat,uLng,radioM);if(r)res.push(r);});
+  return res.sort((a,b)=>b._score-a._score).slice(0,3);
+}
+
+async function buscarArticulos(cat, uLat, uLng, radioM, texto) {
+  const snap=await getDocs(query(collection(db,'articles'),where('category','==',cat)));
+  const res=[];
+  snap.forEach(d=>{const r=calcScoreArt(d.data(),uLat,uLng,radioM,texto);if(r)res.push(r);});
+  return res.sort((a,b)=>b._score-a._score).slice(0,3);
+}
+
+// ══════════════════════════════════════════════════════════
+//  GUARDAR RESEÑA EN FIRESTORE
+// ══════════════════════════════════════════════════════════
+window.guardarResena = async function() {
+  const placeId  = window._currentPlaceId;
+  const placeName= window._currentPlaceName;
+  const rating   = window._currentRatingVal;
+  const comment  = document.getElementById('review-comment')?.value?.trim()||'';
+
+  if (!placeId||!rating) {
+    alert('Por favor selecciona una valoración'); return;
+  }
+
+  try {
+    const btn=document.getElementById('btn-submit-review');
+    btn.disabled=true; btn.textContent='Guardando…';
+
+    // Guardar en colección reviews
+    await addDoc(collection(db,'reviews'),{
+      placeId,
+      placeName,
+      rating,
+      comment,
+      categoria: window._serviceCat||'',
+      ciudad:    window._currentCity||'',
+      userId:    'anon_'+Math.random().toString(36).substr(2,8),
+      createdAt: serverTimestamp(),
+    });
+
+    // Cerrar panel y mostrar confirmación
+    closeReviewPanel();
+    showToast('¡Gracias por tu reseña! 🙌');
+    btn.disabled=false; btn.textContent='Publicar reseña';
+    document.getElementById('review-comment').value='';
+    window._currentRatingVal=0;
+    document.querySelectorAll('.star-btn').forEach(s=>s.classList.remove('active'));
+
+  } catch(e) {
+    console.error(e);
+    alert('Error al guardar la reseña. Inténtalo de nuevo.');
+    document.getElementById('btn-submit-review').disabled=false;
+    document.getElementById('btn-submit-review').textContent='Publicar reseña';
+  }
+};
+
+// ── Helpers UI ─────────────────────────────────────────────
+function fmtDist(m) { return m>=99000?'Online':m>=1000?(m/1000).toFixed(1)+' km':m+' m'; }
+function fmtPrecio(l) { return {1:'€ Económico',2:'€€ Precio medio',3:'€€€ Precio alto',4:'€€€€ Lujo'}[l]||''; }
+
+// ── Render lugares ──────────────────────────────────────────
+function renderLugares(items, radioM) {
+  const catLabel=window._catLabel||'Lugar';
+  if (!items.length) {
+    document.getElementById('results-heading').innerHTML='Sin resultados <em>cercanos</em>';
+    document.getElementById('results-sub').textContent='Aumenta el radio de búsqueda';
+    document.getElementById('card-best').style.display='none';
+    document.getElementById('alts-grid').style.display='none';
+    document.getElementById('art-empty').style.display='none';
+    showResults(); return;
+  }
+  document.getElementById('art-empty').style.display='none';
+  document.getElementById('card-best').style.display='block';
+  document.getElementById('alts-grid').style.display='grid';
+  document.getElementById('results-heading').innerHTML='La mejor <em>opción</em>';
+  document.getElementById('results-sub').textContent=catLabel+' · '+(radioM>=1000?(radioM/1000).toFixed(1)+'km':radioM+'m');
+
+  const best=items[0];
+  window._currentPlaceId  =best.id||best.osmId||'';
+  window._currentPlaceName=best.name||'';
+  window._currentCity     =best.ciudad||'';
+
+  document.getElementById('score-num').textContent=best._score;
+  document.getElementById('best-name').textContent=best.name;
+  document.getElementById('best-type').textContent=best.categoryLabel||catLabel;
+
+  // Rating — combinar Google + Enplan
+  const r=best.ratingCombined||best.rating;
+  document.getElementById('best-stars').textContent=r?'★'.repeat(Math.round(r))+' '+r:'★★★★ —';
+  document.getElementById('best-dist').textContent=fmtDist(best._distM);
+  document.getElementById('best-reviews').textContent=best.reviews?best.reviews.toLocaleString('es'):'—';
+
+  // Info enriquecida
+  document.getElementById('best-address').textContent=
+    best.address?'📍 '+best.address+(best.ciudad?', '+best.ciudad:''):'📍 '+(best.ciudad||'');
+
+  const isOpen=best._isOpen;
+  document.getElementById('best-horario').innerHTML=isOpen===true
+    ?'<div class="dot green"></div> Abierto ahora'
+    :isOpen===false
+      ?'<div class="dot red"></div> Cerrado ahora'
+      :'<div class="dot orange"></div> Horario sin datos';
+  if (best.hours) document.getElementById('best-horario').title=best.hours;
+
+  const telEl=document.getElementById('best-tel');
+  telEl.style.display=best.phone?'flex':'none';
+  if (best.phone) telEl.innerHTML=`📞 <a href="tel:${best.phone}" style="color:inherit">${best.phone}</a>`;
+
+  const webEl=document.getElementById('best-web');
+  webEl.style.display=best.website?'flex':'none';
+  if (best.website) webEl.innerHTML=`🌐 <a href="${best.website}" target="_blank" style="color:inherit;text-decoration:underline">${best.website.replace(/https?:\/\//,'').substring(0,32)}</a>`;
+
+  const prEl=document.getElementById('best-precio');
+  prEl.style.display=best.priceLevel?'inline-flex':'none';
+  prEl.textContent=fmtPrecio(best.priceLevel);
+
+  document.getElementById('best-tags').innerHTML=(best.tags||[]).map(t=>`<span class="tag-p">${t}</span>`).join('');
+
+  document.getElementById('btn-main-action').href=`https://www.openstreetmap.org/?mlat=${best.lat}&mlon=${best.lng}&zoom=18`;
+  document.getElementById('btn-main-action').textContent='Ver en mapa';
+
+  // Barras breakdown
+  animarBarras(best._bd);
+  renderAlts(items,false);
+  showResults();
+}
+
+// ── Render artículos ────────────────────────────────────────
+function renderArticulos(items) {
+  if (!items.length) {
+    document.getElementById('results-heading').innerHTML='Sin resultados';
+    document.getElementById('results-sub').textContent='Base de datos de artículos en construcción';
+    document.getElementById('card-best').style.display='none';
+    document.getElementById('alts-grid').style.display='none';
+    document.getElementById('art-empty').style.display='block';
+    showResults(); return;
+  }
+  document.getElementById('art-empty').style.display='none';
+  document.getElementById('card-best').style.display='block';
+  document.getElementById('alts-grid').style.display='grid';
+  document.getElementById('results-heading').innerHTML='El mejor <em>precio</em>';
+  document.getElementById('results-sub').textContent=window._artCatLabel||'Artículo';
+
+  const best=items[0];
+  document.getElementById('score-num').textContent=best._score;
+  document.getElementById('best-name').textContent=best.name||'—';
+  document.getElementById('best-type').textContent=(best.brand||'')+' · '+(window._artCatLabel||'');
+  document.getElementById('best-stars').textContent=best.rating?'★'.repeat(Math.round(best.rating))+' '+best.rating:'—';
+  document.getElementById('best-dist').textContent=fmtDist(best._distM);
+  document.getElementById('best-reviews').textContent=best.reviews?best.reviews.toLocaleString('es'):'—';
+  document.getElementById('best-address').textContent=best.store?'🏪 '+best.store:'';
+  document.getElementById('best-horario').style.display='none';
+  document.getElementById('best-tel').style.display='none';
+  const webEl=document.getElementById('best-web');
+  webEl.style.display=best.onlineUrl?'flex':'none';
+  if (best.onlineUrl) webEl.innerHTML=`🛒 <a href="${best.onlineUrl}" target="_blank" style="color:inherit;text-decoration:underline">Comprar online</a>`;
+  const prEl=document.getElementById('best-precio');
+  prEl.style.display=best.price?'inline-flex':'none';
+  prEl.textContent=best.price?best.price.toFixed(2)+'€':'';
+  const tags=[];
+  if (best.stock) tags.push('En stock');
+  if (best.warranty) tags.push(best.warranty);
+  if (best.freeShipping) tags.push('Envío gratis');
+  document.getElementById('best-tags').innerHTML=tags.map(t=>`<span class="tag-p">${t}</span>`).join('');
+  document.getElementById('btn-main-action').href=best.onlineUrl||'#';
+  document.getElementById('btn-main-action').textContent=best.onlineUrl?'Comprar':'Ver tienda';
+  animarBarras(best._bd);
+  renderAlts(items,true);
+  showResults();
+}
+
+function animarBarras(bd) {
+  document.querySelectorAll('.bd-fill').forEach(el=>el.style.width='0%');
+  document.querySelectorAll('.bd-num').forEach(el=>el.textContent='—');
+  const map={distancia:'bf-dist',calidad:'bf-cal',precio:'bf-pre',resenas:'bf-res',abierto:'bf-ab',stock:'bf-sto',garantia:'bf-gar'};
+  setTimeout(()=>{
+    Object.entries(bd).forEach(([k,v])=>{
+      const el=document.getElementById(map[k]);
+      if (el){el.style.width=v+'%';el.nextElementSibling.textContent=v;}
+    });
+  },150);
+}
+
+function renderAlts(items,isArt) {
+  [1,2].forEach(i=>{
+    const item=items[i];
+    if (!item){document.getElementById(`alt${i}-name`).textContent='—';document.getElementById(`alt${i}-type`).textContent='Sin más resultados';return;}
+    document.getElementById(`alt${i}-name`).textContent=item.name;
+    document.getElementById(`alt${i}-type`).textContent=item.categoryLabel||item.brand||'—';
+    document.getElementById(`alt${i}-score`).textContent=item._score;
+    if (isArt){
+      document.getElementById(`alt${i}-v1`).textContent=item.price?item.price.toFixed(2)+'€':'—';
+      document.getElementById(`alt${i}-l1`).textContent='Precio';
+    } else {
+      const r2=item.ratingCombined||item.rating;
+      document.getElementById(`alt${i}-v1`).textContent=r2?'★ '+r2:'★ —';
+      document.getElementById(`alt${i}-l1`).textContent='Rating';
+    }
+    document.getElementById(`alt${i}-v2`).textContent=fmtDist(item._distM);
+    document.getElementById(`alt${i}-l2`).textContent='Distancia';
+    const io=item._isOpen;
+    document.getElementById(`alt${i}-open`).innerHTML=io===true
+      ?'<div class="dot green"></div> Abierto'
+      :io===false?'<div class="dot red"></div> Cerrado'
+      :'<div class="dot orange"></div> —';
+  });
+}
+
+function showResults() {
+  const r=document.getElementById('results');
+  r.classList.add('visible');
+  setTimeout(()=>r.scrollIntoView({behavior:'smooth',block:'start'}),100);
+}
+
+// ══════════════════════════════════════════════════════════
+//  BÚSQUEDA PRINCIPAL
+// ══════════════════════════════════════════════════════════
+window.doSearch = async function() {
+  const btn=document.getElementById('search-btn');
+  btn.classList.add('loading'); btn.innerHTML='<span class="spinner"></span>Buscando…';
+  try {
+    let uLat=window._userLat, uLng=window._userLng;
+    if (!uLat||!uLng) {
+      try {
+        const pos=await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000}));
+        uLat=pos.coords.latitude; uLng=pos.coords.longitude;
+        window._userLat=uLat; window._userLng=uLng;
+      } catch { uLat=41.5628; uLng=2.0089; }
+    }
+    if (window._modo==='services') {
+      const items=await buscarLugares(window._serviceCat||'restaurant',uLat,uLng,window._radius||1000);
+      renderLugares(items,window._radius||1000);
+    } else {
+      const texto=document.getElementById('product-input')?.value||'';
+      const artRad=parseInt(document.getElementById('art-radius')?.value||20000);
+      const items=await buscarArticulos(window._artCat||'electronics',uLat,uLng,artRad,texto);
+      renderArticulos(items);
+    }
+  } catch(e) {
+    console.error(e); alert('Error al buscar. Comprueba tu conexión.');
+  } finally {
+    btn.classList.remove('loading'); btn.innerHTML='Encontrar el mejor';
+  }
+};
+
+// ── GPS al cargar ───────────────────────────────────────────
+window.addEventListener('load',()=>{
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(async pos=>{
+    window._userLat=pos.coords.latitude; window._userLng=pos.coords.longitude;
+    try {
+      const r=await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${pos.coords.latitude}&lon=${pos.coords.longitude}&format=json&accept-language=es`);
+      const d=await r.json();
+      const zona=d.address?.suburb||d.address?.neighbourhood||d.address?.city_district||'';
+      const ciudad=d.address?.city||d.address?.town||'';
+      const linea2=zona&&zona!==ciudad?zona+', '+ciudad:ciudad;
+      document.getElementById('loc-current-val').innerHTML=
+        `<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>
+        <span style="display:flex;flex-direction:column;line-height:1.3"><span>Mi ubicación</span><span style="font-size:10px;font-weight:300;color:#8a6e3a">${linea2}</span></span>`;
+    } catch {
+      document.getElementById('loc-current-val').innerHTML=
+        `<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> Mi ubicación`;
+    }
+  },()=>{
+    document.getElementById('loc-current-val').innerHTML=
+      `<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#a8a09a" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#a8a09a" stroke-width="1.5" fill="none"/></svg>
+      <span style="display:flex;flex-direction:column;line-height:1.3"><span>Ubicación aprox.</span><span style="font-size:10px;color:#a8a09a">Activa el GPS para más precisión</span></span>`;
+  },{timeout:10000,enableHighAccuracy:true});
+});
+</script>
+
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --white:#ffffff;--off:#f8f7f5;--off2:#f2f0ec;
+  --border:#e8e4de;--border2:#d8d3cb;
+  --text:#1e3a5f;--text-mid:#6b6560;--text-light:#a8a09a;
+  --gold:#c8a96e;--gold-dim:rgba(200,169,110,0.12);
+  --green:#4a9e6e;--red:#c0574a;--orange:#e8a84a;
+  --shadow-sm:0 1px 4px rgba(0,0,0,0.06);
+  --shadow-md:0 4px 20px rgba(0,0,0,0.08);
+  --shadow-lg:0 12px 48px rgba(0,0,0,0.10);
+  --r:16px;--r-sm:10px;
+}
+html{scroll-behavior:smooth}
+body{background:var(--off);color:var(--text);font-family:'Outfit',sans-serif;font-weight:300;min-height:100dvh;-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
+.app{max-width:460px;margin:0 auto;padding:0 18px 60px}
+
+/* Header */
+header{padding:40px 0 28px;display:flex;align-items:flex-start;justify-content:space-between}
+.wordmark{font-family:'Cormorant Garamond',serif;font-weight:500;font-size:30px;letter-spacing:-0.5px;color:var(--text);line-height:1}
+.wordmark em{font-style:italic;color:var(--gold)}
+.wordmark-sub{font-size:10px;letter-spacing:3px;text-transform:uppercase;color:var(--text-light);margin-top:5px}
+.header-btns{display:flex;gap:8px}
+.icon-btn{width:40px;height:40px;border-radius:50%;background:var(--white);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.2s;box-shadow:var(--shadow-sm)}
+.icon-btn:hover{border-color:var(--border2);box-shadow:var(--shadow-md)}
+.icon-btn svg{width:18px;height:18px;stroke:var(--text-mid);fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+
+/* Mode switch */
+.mode-switch{display:grid;grid-template-columns:1fr 1fr;background:var(--white);border:1px solid var(--border);border-radius:14px;padding:5px;margin-bottom:22px;box-shadow:var(--shadow-sm)}
+.mode-tab{padding:11px;text-align:center;border-radius:10px;cursor:pointer;transition:all 0.25s;font-size:12px;color:var(--text-mid);display:flex;align-items:center;justify-content:center;gap:7px}
+.mode-tab.active{background:var(--text);color:white;box-shadow:0 2px 8px rgba(0,0,0,0.15)}
+
+/* Ubicación */
+.loc-section{margin-bottom:20px}
+.section-label{font-size:9px;font-weight:500;letter-spacing:3px;text-transform:uppercase;color:var(--text-light);margin-bottom:10px}
+.loc-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.loc-card{background:var(--white);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;cursor:pointer;transition:all 0.2s;box-shadow:var(--shadow-sm)}
+.loc-card.active{border-color:var(--gold);background:var(--gold-dim)}
+.loc-card-label{font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text-light);margin-bottom:5px}
+.loc-card-val{font-weight:500;font-size:13px;color:var(--text);display:flex;align-items:center;gap:6px}
+.loc-card.active .loc-card-val{color:#8a6e3a}
+.dest-input-wrap{display:none;margin-top:8px}
+.dest-input{width:100%;background:var(--white);border:1.5px solid var(--gold);border-radius:var(--r-sm);padding:12px 16px;font-family:'Outfit',sans-serif;font-size:13px;color:var(--text);outline:none}
+
+/* Categorías */
+.cat-section{margin-bottom:20px}
+.cat-scroll{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+.cat-scroll::-webkit-scrollbar{display:none}
+.cat-chip{background:var(--white);border:1px solid var(--border);border-radius:40px;padding:9px 16px;white-space:nowrap;cursor:pointer;transition:all 0.2s;display:flex;align-items:center;gap:7px;box-shadow:var(--shadow-sm);font-size:12px;color:var(--text-mid)}
+.cat-chip.active{background:var(--text);border-color:var(--text);color:white}
+.cat-chip .chip-icon{font-size:15px}
+
+/* Radio */
+.radius-row{display:flex;align-items:center;gap:12px;margin-bottom:16px;background:var(--white);border:1px solid var(--border);border-radius:var(--r);padding:14px 18px;box-shadow:var(--shadow-sm)}
+.radius-lbl{font-size:11px;color:var(--text-light);letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
+input[type=range]{flex:1;-webkit-appearance:none;height:2px;background:var(--border);border-radius:2px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:var(--text);cursor:pointer;border:3px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.2)}
+.radius-val{font-weight:500;font-size:13px;color:var(--text);min-width:44px;text-align:right}
+
+/* Búsqueda artículo */
+.product-wrap{margin-bottom:16px}
+.product-input{width:100%;background:var(--white);border:1.5px solid var(--border);border-radius:var(--r);padding:16px 20px;font-family:'Outfit',sans-serif;font-size:14px;color:var(--text);outline:none;box-shadow:var(--shadow-sm);transition:border-color 0.2s}
+.product-input:focus{border-color:var(--gold)}
+.product-input::placeholder{color:var(--text-light)}
+
+/* Botón buscar */
+.search-btn{width:100%;padding:17px;background:var(--text);color:white;border:none;border-radius:var(--r);font-family:'Outfit',sans-serif;font-weight:500;font-size:14px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;transition:all 0.22s;box-shadow:0 4px 18px rgba(0,0,0,0.18);margin-bottom:28px}
+.search-btn:hover{transform:translateY(-1px);box-shadow:0 6px 24px rgba(0,0,0,0.22)}
+.search-btn.loading{opacity:0.7;pointer-events:none}
+.spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Secciones */
+.services-section{display:none}.services-section.visible{display:block}
+.articles-section{display:none}.articles-section.visible{display:block}
+
+/* Resultados */
+.results{display:none}.results.visible{display:block;animation:fadeIn 0.3s ease}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+.results-header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px}
+.results-heading{font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:500;color:var(--text)}
+.results-heading em{font-style:italic;color:var(--gold)}
+.results-sub{font-size:11px;color:var(--text-light)}
+
+/* Card mejor */
+.card-best{background:var(--white);border-radius:20px;padding:24px;margin-bottom:12px;box-shadow:var(--shadow-lg);border:1px solid var(--border);animation:slideUp 0.4s cubic-bezier(.4,0,.2,1) both;position:relative;overflow:hidden}
+.card-best::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--gold),#e8c07e,var(--gold))}
+.best-badge{display:inline-flex;align-items:center;gap:5px;background:var(--gold-dim);color:#8a6e3a;border:1px solid rgba(200,169,110,0.3);border-radius:6px;padding:4px 10px;font-size:10px;font-weight:500;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px}
+.score-pill{float:right;margin:0 0 10px 12px;background:var(--text);color:white;border-radius:50px;padding:8px 14px;font-weight:600;font-size:18px;line-height:1;display:flex;flex-direction:column;align-items:center}
+.score-pill .score-sub{font-size:8px;font-weight:400;letter-spacing:1px;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-top:3px}
+.place-name{font-family:'Cormorant Garamond',serif;font-weight:600;font-size:24px;letter-spacing:-0.5px;line-height:1.1;margin-bottom:4px;color:var(--text)}
+.place-type{font-size:11px;color:var(--text-light);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:16px}
+.metrics-row{display:flex;gap:20px;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.metric{display:flex;flex-direction:column;gap:2px}
+.metric-val{font-weight:500;font-size:17px;color:var(--text)}
+.metric-stars{font-size:13px;color:var(--gold)}
+.metric-lbl{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-light)}
+
+/* Info enriquecida */
+.place-info{display:flex;flex-direction:column;gap:7px;margin-bottom:12px}
+.info-row{font-size:12px;color:var(--text-mid);display:flex;align-items:center;gap:8px;line-height:1.4}
+.info-row a{color:var(--text-mid)}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.dot.green{background:var(--green)}.dot.red{background:var(--red)}.dot.orange{background:var(--orange)}
+.precio-badge{display:inline-flex;align-items:center;background:var(--off);border:1px solid var(--border);border-radius:20px;padding:4px 12px;font-size:11px;color:var(--text-mid);margin-bottom:10px}
+
+/* Tags */
+.tags-place{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.tag-p{background:var(--off);border:1px solid var(--border);border-radius:20px;padding:4px 11px;font-size:10px;color:var(--text-mid);text-transform:capitalize}
+
+/* Breakdown */
+.breakdown{padding-top:12px;border-top:1px solid var(--border);margin-bottom:14px}
+.bd-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.bd-label{font-size:10px;color:var(--text-light);text-transform:uppercase;letter-spacing:1px;width:72px;flex-shrink:0}
+.bd-track{flex:1;height:3px;background:var(--off2);border-radius:2px;overflow:hidden}
+.bd-fill{height:100%;background:var(--gold);border-radius:2px;transition:width 0.9s cubic-bezier(.4,0,.2,1)}
+.bd-num{font-size:11px;font-weight:500;color:var(--text-mid);width:22px;text-align:right}
+
+/* Acciones */
+.card-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.btn-a{padding:11px 8px;border-radius:var(--r-sm);font-family:'Outfit',sans-serif;font-size:11px;font-weight:500;cursor:pointer;transition:all 0.2s;text-align:center;text-decoration:none;display:block;border:none}
+.btn-dark{background:var(--text);color:white}.btn-dark:hover{opacity:0.88}
+.btn-outline{background:transparent;border:1.5px solid var(--border);color:var(--text-mid)}.btn-outline:hover{border-color:var(--border2);color:var(--text)}
+.btn-gold{background:var(--gold-dim);border:1px solid rgba(200,169,110,0.4);color:#8a6e3a}.btn-gold:hover{background:rgba(200,169,110,0.2)}
+
+/* Cards alternativas */
+.alts-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.card-alt{background:var(--white);border:1px solid var(--border);border-radius:var(--r);padding:16px;box-shadow:var(--shadow-sm);cursor:pointer;transition:all 0.2s;animation:slideUp 0.4s cubic-bezier(.4,0,.2,1) both}
+.card-alt:nth-child(1){animation-delay:0.08s}.card-alt:nth-child(2){animation-delay:0.16s}
+.card-alt:hover{box-shadow:var(--shadow-md);transform:translateY(-2px)}
+.alt-badge{font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text-light);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.alt-score{background:var(--text);color:white;border-radius:20px;padding:2px 8px;font-size:10px;font-weight:600}
+.alt-name{font-family:'Cormorant Garamond',serif;font-weight:600;font-size:16px;color:var(--text);margin-bottom:3px;line-height:1.2}
+.alt-type{font-size:10px;color:var(--text-light);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
+.alt-metrics{display:flex;gap:12px;margin-bottom:8px}
+.alt-m{display:flex;flex-direction:column;gap:2px}
+.alt-val{font-weight:500;font-size:14px;color:var(--text)}
+.alt-lbl{font-size:9px;color:var(--text-light);letter-spacing:1px;text-transform:uppercase}
+.open-badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-mid)}
+
+/* Artículos vacío */
+.art-empty{display:none;background:var(--off);border:1px solid var(--border);border-radius:var(--r);padding:24px;text-align:center;margin-top:16px}
+.art-empty p{font-size:13px;color:var(--text-mid);line-height:1.6}
+
+/* Paneles */
+.overlay{display:none;position:fixed;inset:0;background:rgba(26,24,20,0.4);z-index:100;backdrop-filter:blur(3px)}
+.overlay.open{display:block;animation:fadeIn 0.2s}
+.slide-panel{position:fixed;bottom:0;left:0;right:0;max-height:90dvh;background:var(--white);border-radius:24px 24px 0 0;z-index:101;transform:translateY(100%);transition:transform 0.35s cubic-bezier(.4,0,.2,1);display:flex;flex-direction:column;overflow:hidden}
+.slide-panel.open{transform:translateY(0)}
+.panel-handle{width:36px;height:4px;background:var(--border);border-radius:4px;margin:14px auto 0;flex-shrink:0}
+.panel-header{padding:18px 24px 14px;display:flex;align-items:baseline;justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0}
+.panel-title{font-family:'Cormorant Garamond',serif;font-weight:500;font-size:22px;color:var(--text)}
+.panel-close{font-size:12px;color:var(--text-light);cursor:pointer;letter-spacing:1px;text-transform:uppercase;padding:4px 8px;border-radius:6px}
+.panel-close:hover{background:var(--off)}
+.panel-body{overflow-y:auto;padding:20px 24px 36px;flex:1}
+.panel-section{margin-bottom:28px}
+.panel-section-title{font-size:10px;font-weight:500;letter-spacing:3px;text-transform:uppercase;color:var(--text-light);margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+
+/* Filtros sliders */
+.filter-row{display:flex;align-items:center;gap:10px;margin-bottom:13px}
+.filter-icon{font-size:17px;width:24px;flex-shrink:0}
+.filter-name{font-size:12px;color:var(--text-mid);width:120px;flex-shrink:0}
+.filter-slider{flex:1}
+.filter-val{font-size:11px;font-weight:500;color:var(--text);width:28px;text-align:right}
+
+/* Config servicios */
+.service-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.service-item{display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--off);border:1.5px solid transparent;border-radius:12px;cursor:pointer;transition:all 0.2s}
+.service-item:hover{background:var(--off2)}
+.service-item.selected{background:var(--gold-dim);border-color:rgba(200,169,110,0.4)}
+.service-icon{font-size:18px;flex-shrink:0}
+.service-name{font-size:12px;color:var(--text-mid)}
+.service-item.selected .service-name{color:#7a5f2a;font-weight:500}
+.service-check{margin-left:auto;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--border2);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.service-item.selected .service-check{background:var(--gold);border-color:var(--gold)}
+.service-item.selected .service-check::after{content:'';width:5px;height:5px;background:white;border-radius:50%}
+.panel-save-btn{width:100%;padding:15px;background:var(--text);color:white;border:none;border-radius:var(--r);font-family:'Outfit',sans-serif;font-weight:500;font-size:13px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;margin-top:8px}
+.panel-save-btn:hover{opacity:0.88}
+
+/* Panel reseña */
+.stars-row{display:flex;gap:10px;justify-content:center;margin:16px 0}
+.star-btn{font-size:32px;cursor:pointer;opacity:0.3;transition:all 0.15s;background:none;border:none;padding:4px}
+.star-btn.active{opacity:1;transform:scale(1.1)}
+.review-textarea{width:100%;min-height:100px;background:var(--off);border:1.5px solid var(--border);border-radius:var(--r-sm);padding:14px;font-family:'Outfit',sans-serif;font-size:13px;color:var(--text);outline:none;resize:vertical;margin-bottom:16px}
+.review-textarea:focus{border-color:var(--gold)}
+.review-place-name{font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:600;color:var(--text);margin-bottom:4px}
+.review-cat{font-size:11px;color:var(--text-light);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:20px}
+
+/* Toast */
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--text);color:white;padding:12px 24px;border-radius:30px;font-size:13px;z-index:999;transition:transform 0.3s cubic-bezier(.4,0,.2,1);white-space:nowrap}
+.toast.show{transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div>
+      <div class="wordmark">En<em>plan</em></div>
+      <div class="wordmark-sub">Encuentra tu plan, siempre</div>
+    </div>
+    <div class="header-btns">
+      <div class="icon-btn" onclick="openPanel('filtros')" title="Filtros">
+        <svg viewBox="0 0 24 24"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
+      </div>
+      <div class="icon-btn" onclick="openPanel('config')" title="Configuración">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </div>
+    </div>
+  </header>
+
+  <div class="mode-switch">
+    <div class="mode-tab active" id="tab-services" onclick="setMode('services')"><span>📍</span> Lugares y servicios</div>
+    <div class="mode-tab" id="tab-articles" onclick="setMode('articles')"><span>🛍️</span> Artículos y precio</div>
+  </div>
+
+  <div class="loc-section">
+    <div class="section-label">Ubicación</div>
+    <div class="loc-grid">
+      <div class="loc-card active" id="loc-current">
+        <div class="loc-card-label">Actual</div>
+        <div class="loc-card-val" id="loc-current-val">
+          <svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>
+          Detectando…
+        </div>
+      </div>
+      <div class="loc-card" id="loc-dest" onclick="toggleDestInput()">
+        <div class="loc-card-label">Destino</div>
+        <div class="loc-card-val" id="loc-dest-val">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1v10M1 6h10" stroke="#a8a09a" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Fijar destino
+        </div>
+      </div>
+    </div>
+    <div class="dest-input-wrap" id="dest-input-wrap">
+      <input class="dest-input" id="dest-input" type="text" placeholder="Ciudad, barrio o dirección…"
+        onkeydown="if(event.key==='Enter')confirmDest(this.value)">
+    </div>
+  </div>
+
+  <!-- MODO SERVICIOS -->
+  <div class="services-section visible" id="services-section">
+    <div class="cat-section">
+      <div class="section-label">Categoría</div>
+      <div class="cat-scroll" id="cat-scroll"></div>
+    </div>
+    <div class="radius-row">
+      <span class="radius-lbl">Radio</span>
+      <input type="range" id="radius-slider" min="200" max="10000" step="100" value="1000"
+        oninput="window._radius=parseInt(this.value);document.getElementById('radius-val').textContent=this.value>=1000?(this.value/1000).toFixed(1)+' km':this.value+' m'">
+      <span class="radius-val" id="radius-val">1 km</span>
+    </div>
+  </div>
+
+  <!-- MODO ARTÍCULOS -->
+  <div class="articles-section" id="articles-section">
+    <div class="product-wrap">
+      <div class="section-label">¿Qué artículo buscas?</div>
+      <input class="product-input" id="product-input" type="text" placeholder="Ej: Nike Air Max 90, Samsung Galaxy S25…">
+    </div>
+    <div class="cat-section">
+      <div class="section-label">Categoría</div>
+      <div class="cat-scroll" id="art-cat-scroll">
+        <div class="cat-chip active" data-cat="electronics" data-name="Electrónica" onclick="selectArtCat(this)"><span class="chip-icon">📱</span>Electrónica</div>
+        <div class="cat-chip" data-cat="footwear" data-name="Calzado" onclick="selectArtCat(this)"><span class="chip-icon">👟</span>Calzado</div>
+        <div class="cat-chip" data-cat="clothing_art" data-name="Ropa" onclick="selectArtCat(this)"><span class="chip-icon">👕</span>Ropa</div>
+        <div class="cat-chip" data-cat="music" data-name="Música" onclick="selectArtCat(this)"><span class="chip-icon">🎸</span>Música</div>
+        <div class="cat-chip" data-cat="gaming" data-name="Gaming" onclick="selectArtCat(this)"><span class="chip-icon">🎮</span>Gaming</div>
+        <div class="cat-chip" data-cat="books" data-name="Libros" onclick="selectArtCat(this)"><span class="chip-icon">📖</span>Libros</div>
+        <div class="cat-chip" data-cat="sport_art" data-name="Deporte" onclick="selectArtCat(this)"><span class="chip-icon">⚽</span>Deporte</div>
+        <div class="cat-chip" data-cat="appliances" data-name="Hogar" onclick="selectArtCat(this)"><span class="chip-icon">🏠</span>Hogar</div>
+      </div>
+    </div>
+    <div class="radius-row">
+      <span class="radius-lbl">Radio tiendas</span>
+      <input type="range" id="art-radius" min="1000" max="50000" step="1000" value="20000"
+        oninput="document.getElementById('art-radius-val').textContent=(this.value/1000).toFixed(0)+' km'">
+      <span class="radius-val" id="art-radius-val">20 km</span>
+    </div>
+  </div>
+
+  <button class="search-btn" id="search-btn" onclick="doSearch()">Encontrar el mejor</button>
+
+  <!-- RESULTADOS -->
+  <div class="results" id="results">
+    <div class="results-header">
+      <div class="results-heading" id="results-heading">La mejor <em>opción</em></div>
+      <div class="results-sub" id="results-sub">—</div>
+    </div>
+
+    <div class="card-best" id="card-best">
+      <div class="best-badge">⭐ Mejor opción</div>
+      <div class="score-pill"><span id="score-num">—</span><span class="score-sub">Score</span></div>
+      <div class="place-name" id="best-name">—</div>
+      <div class="place-type" id="best-type">—</div>
+      <div class="metrics-row">
+        <div class="metric"><span class="metric-stars" id="best-stars">—</span><span class="metric-lbl">Valoración</span></div>
+        <div class="metric"><span class="metric-val" id="best-dist">—</span><span class="metric-lbl">Distancia</span></div>
+        <div class="metric"><span class="metric-val" id="best-reviews">—</span><span class="metric-lbl">Reseñas</span></div>
+      </div>
+      <div class="place-info">
+        <div class="info-row" id="best-address">—</div>
+        <div class="info-row" id="best-horario"><div class="dot orange"></div> Horario sin datos</div>
+        <div class="info-row" id="best-tel" style="display:none"></div>
+        <div class="info-row" id="best-web" style="display:none"></div>
+      </div>
+      <span class="precio-badge" id="best-precio" style="display:none"></span>
+      <div class="tags-place" id="best-tags"></div>
+      <div class="breakdown">
+        <div class="bd-row"><span class="bd-label">Distancia</span><div class="bd-track"><div class="bd-fill" id="bf-dist" style="width:0%"></div></div><span class="bd-num">—</span></div>
+        <div class="bd-row"><span class="bd-label">Calidad</span><div class="bd-track"><div class="bd-fill" id="bf-cal" style="width:0%"></div></div><span class="bd-num">—</span></div>
+        <div class="bd-row"><span class="bd-label">Precio</span><div class="bd-track"><div class="bd-fill" id="bf-pre" style="width:0%"></div></div><span class="bd-num">—</span></div>
+        <div class="bd-row"><span class="bd-label">Reseñas</span><div class="bd-track"><div class="bd-fill" id="bf-res" style="width:0%"></div></div><span class="bd-num">—</span></div>
+        <div class="bd-row"><span class="bd-label">Horario</span><div class="bd-track"><div class="bd-fill" id="bf-ab" style="width:0%"></div></div><span class="bd-num">—</span></div>
+        <div class="bd-row" style="display:none"><span class="bd-label">Stock</span><div class="bd-track"><div class="bd-fill" id="bf-sto" style="width:0%"></div></div><span class="bd-num">—</span></div>
+        <div class="bd-row" style="display:none"><span class="bd-label">Garantía</span><div class="bd-track"><div class="bd-fill" id="bf-gar" style="width:0%"></div></div><span class="bd-num">—</span></div>
+      </div>
+      <div class="card-actions">
+        <a class="btn-a btn-dark" id="btn-main-action" href="#" target="_blank">Ver en mapa</a>
+        <button class="btn-a btn-gold" onclick="openReviewPanel()">⭐ Reseña</button>
+        <button class="btn-a btn-outline" onclick="compartir()">Compartir</button>
+      </div>
+    </div>
+
+    <div class="alts-grid" id="alts-grid">
+      <div class="card-alt">
+        <div class="alt-badge">2ª opción <span class="alt-score" id="alt1-score">—</span></div>
+        <div class="alt-name" id="alt1-name">—</div>
+        <div class="alt-type" id="alt1-type">—</div>
+        <div class="alt-metrics">
+          <div class="alt-m"><span class="alt-val" id="alt1-v1">—</span><span class="alt-lbl" id="alt1-l1">Rating</span></div>
+          <div class="alt-m"><span class="alt-val" id="alt1-v2">—</span><span class="alt-lbl" id="alt1-l2">Distancia</span></div>
+        </div>
+        <div class="open-badge" id="alt1-open"><div class="dot orange"></div> —</div>
+      </div>
+      <div class="card-alt">
+        <div class="alt-badge">3ª opción <span class="alt-score" id="alt2-score">—</span></div>
+        <div class="alt-name" id="alt2-name">—</div>
+        <div class="alt-type" id="alt2-type">—</div>
+        <div class="alt-metrics">
+          <div class="alt-m"><span class="alt-val" id="alt2-v1">—</span><span class="alt-lbl" id="alt2-l1">Rating</span></div>
+          <div class="alt-m"><span class="alt-val" id="alt2-v2">—</span><span class="alt-lbl" id="alt2-l2">Distancia</span></div>
+        </div>
+        <div class="open-badge" id="alt2-open"><div class="dot orange"></div> —</div>
+      </div>
+    </div>
+
+    <div class="art-empty" id="art-empty">
+      <p>🛍️ La base de datos de artículos está en construcción.<br>Pronto podrás buscar productos y comparar precios en tiendas cercanas.</p>
+    </div>
+  </div>
+</div>
+
+<!-- OVERLAY -->
+<div class="overlay" id="overlay" onclick="closePanel()"></div>
+
+<!-- PANEL FILTROS -->
+<div class="slide-panel" id="panel-filtros">
+  <div class="panel-handle"></div>
+  <div class="panel-header">
+    <div class="panel-title">Filtros</div>
+    <div class="panel-close" onclick="closePanel()">Cerrar</div>
+  </div>
+  <div class="panel-body">
+    <div class="panel-section">
+      <div class="panel-section-title">Lugares y servicios — importancia de cada parámetro</div>
+      <!-- Añadir nuevos parámetros aquí siguiendo el mismo patrón -->
+      <div class="filter-row"><span class="filter-icon">📍</span><span class="filter-name">Distancia</span><input class="filter-slider" type="range" id="w-distancia" min="0" max="100" value="70" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">70</span></div>
+      <div class="filter-row"><span class="filter-icon">⭐</span><span class="filter-name">Calidad / Rating</span><input class="filter-slider" type="range" id="w-calidad" min="0" max="100" value="50" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">50</span></div>
+      <div class="filter-row"><span class="filter-icon">💰</span><span class="filter-name">Precio económico</span><input class="filter-slider" type="range" id="w-precio" min="0" max="100" value="30" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">30</span></div>
+      <div class="filter-row"><span class="filter-icon">💬</span><span class="filter-name">Nº reseñas</span><input class="filter-slider" type="range" id="w-resenas" min="0" max="100" value="20" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">20</span></div>
+      <div class="filter-row"><span class="filter-icon">🕐</span><span class="filter-name">Abierto ahora</span><input class="filter-slider" type="range" id="w-abierto" min="0" max="100" value="60" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">60</span></div>
+      <div class="filter-row"><span class="filter-icon">♿</span><span class="filter-name">Accesibilidad</span><input class="filter-slider" type="range" id="w-accesible" min="0" max="100" value="0" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">0</span></div>
+      <div class="filter-row"><span class="filter-icon">📶</span><span class="filter-name">WiFi</span><input class="filter-slider" type="range" id="w-wifi" min="0" max="100" value="0" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">0</span></div>
+      <div class="filter-row"><span class="filter-icon">🅿️</span><span class="filter-name">Aparcamiento</span><input class="filter-slider" type="range" id="w-parking" min="0" max="100" value="0" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">0</span></div>
+      <div class="filter-row"><span class="filter-icon">🌿</span><span class="filter-name">Terraza</span><input class="filter-slider" type="range" id="w-terraza" min="0" max="100" value="0" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">0</span></div>
+      <div class="filter-row"><span class="filter-icon">💳</span><span class="filter-name">Acepta tarjeta</span><input class="filter-slider" type="range" id="w-tarjeta" min="0" max="100" value="0" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">0</span></div>
+    </div>
+    <div class="panel-section">
+      <div class="panel-section-title">Artículos — importancia de cada parámetro</div>
+      <div class="filter-row"><span class="filter-icon">💰</span><span class="filter-name">Precio más bajo</span><input class="filter-slider" type="range" id="wa-precio" min="0" max="100" value="80" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">80</span></div>
+      <div class="filter-row"><span class="filter-icon">📦</span><span class="filter-name">Stock disponible</span><input class="filter-slider" type="range" id="wa-stock" min="0" max="100" value="70" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">70</span></div>
+      <div class="filter-row"><span class="filter-icon">📍</span><span class="filter-name">Tienda cercana</span><input class="filter-slider" type="range" id="wa-distancia" min="0" max="100" value="40" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">40</span></div>
+      <div class="filter-row"><span class="filter-icon">🛡️</span><span class="filter-name">Garantía oficial</span><input class="filter-slider" type="range" id="wa-garantia" min="0" max="100" value="50" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">50</span></div>
+      <div class="filter-row"><span class="filter-icon">🚚</span><span class="filter-name">Envío gratuito</span><input class="filter-slider" type="range" id="wa-envio" min="0" max="100" value="30" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">30</span></div>
+      <div class="filter-row"><span class="filter-icon">⭐</span><span class="filter-name">Valoración producto</span><input class="filter-slider" type="range" id="wa-valoracion" min="0" max="100" value="40" oninput="this.nextElementSibling.textContent=this.value"><span class="filter-val">40</span></div>
+    </div>
+    <button class="panel-save-btn" onclick="closePanel()">Aplicar filtros</button>
+  </div>
+</div>
+
+<!-- PANEL CONFIGURACIÓN -->
+<div class="slide-panel" id="panel-config">
+  <div class="panel-handle"></div>
+  <div class="panel-header">
+    <div class="panel-title">Configuración</div>
+    <div class="panel-close" onclick="closePanel()">Cerrar</div>
+  </div>
+  <div class="panel-body">
+    <div class="panel-section"><div class="panel-section-title">Restauración y alimentación</div><div class="service-grid" id="sg-food"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Ocio y entretenimiento</div><div class="service-grid" id="sg-leisure"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Salud y deporte</div><div class="service-grid" id="sg-health"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Educación y cultura</div><div class="service-grid" id="sg-edu"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Servicios urbanos</div><div class="service-grid" id="sg-urban"></div></div>
+    <div class="panel-section"><div class="panel-section-title">Comercios</div><div class="service-grid" id="sg-shops"></div></div>
+    <button class="panel-save-btn" onclick="saveConfig()">Guardar y aplicar</button>
+  </div>
+</div>
+
+<!-- PANEL RESEÑA -->
+<div class="slide-panel" id="panel-resena">
+  <div class="panel-handle"></div>
+  <div class="panel-header">
+    <div class="panel-title">Dejar reseña</div>
+    <div class="panel-close" onclick="closeReviewPanel()">Cerrar</div>
+  </div>
+  <div class="panel-body">
+    <div class="review-place-name" id="review-place-name">—</div>
+    <div class="review-cat" id="review-cat">—</div>
+    <div class="panel-section-title">¿Cómo fue tu experiencia?</div>
+    <div class="stars-row">
+      <button class="star-btn" onclick="setReviewRating(1)">⭐</button>
+      <button class="star-btn" onclick="setReviewRating(2)">⭐</button>
+      <button class="star-btn" onclick="setReviewRating(3)">⭐</button>
+      <button class="star-btn" onclick="setReviewRating(4)">⭐</button>
+      <button class="star-btn" onclick="setReviewRating(5)">⭐</button>
+    </div>
+    <textarea class="review-textarea" id="review-comment" placeholder="Cuéntanos tu experiencia (opcional)…"></textarea>
+    <button class="panel-save-btn" id="btn-submit-review" onclick="guardarResena()">Publicar reseña</button>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Variables globales ──────────────────────────────────
+window._modo          = 'services';
+window._serviceCat    = 'restaurant';
+window._catLabel      = 'Restaurante';
+window._artCat        = 'electronics';
+window._artCatLabel   = 'Electrónica';
+window._radius        = 1000;
+window._userLat       = null;
+window._userLng       = null;
+window._currentPlaceId   = '';
+window._currentPlaceName = '';
+window._currentCity      = '';
+window._currentRatingVal = 0;
+
+// ── Catálogo categorías ─────────────────────────────────
+// Añadir nuevas categorías aquí
+const CAT = {
+  'sg-food':    [{id:'restaurant',icon:'🍽️',name:'Restaurante'},{id:'cafe',icon:'☕',name:'Cafetería'},{id:'bakery',icon:'🥐',name:'Panadería'},{id:'bar',icon:'🍺',name:'Bar'},{id:'fast_food',icon:'🍔',name:'Comida rápida'},{id:'ice_cream',icon:'🍦',name:'Heladería'}],
+  'sg-leisure': [{id:'nightclub',icon:'🎵',name:'Discoteca'},{id:'cinema',icon:'🎬',name:'Cine'},{id:'theater',icon:'🎭',name:'Teatro'}],
+  'sg-health':  [{id:'gym',icon:'🏋️',name:'Gimnasio'},{id:'pharmacy',icon:'💊',name:'Farmacia'},{id:'hospital',icon:'🏥',name:'Centro médico'},{id:'pool',icon:'🏊',name:'Piscina'},{id:'yoga',icon:'🧘',name:'Yoga'},{id:'dentist',icon:'🦷',name:'Dentista'}],
+  'sg-edu':     [{id:'library',icon:'📚',name:'Biblioteca'},{id:'university',icon:'🎓',name:'Universidad'},{id:'school',icon:'🏫',name:'Colegio'}],
+  'sg-urban':   [{id:'gas',icon:'⛽',name:'Gasolinera'},{id:'hotel',icon:'🏨',name:'Hotel'},{id:'bank',icon:'🏦',name:'Banco / ATM'},{id:'parking',icon:'🅿️',name:'Aparcamiento'}],
+  'sg-shops':   [{id:'supermarket',icon:'🛒',name:'Supermercado'},{id:'clothing',icon:'👗',name:'Tienda de ropa'},{id:'electronics_shop',icon:'💻',name:'Electrónica'},{id:'bookshop',icon:'📕',name:'Librería'},{id:'pet_shop',icon:'🐾',name:'Mascotas'},{id:'florist',icon:'🌸',name:'Floristería'}],
+};
+
+const activeServices = new Set(['restaurant','cafe','pharmacy','supermarket','gas','hotel','library','gym','bakery']);
+
+function renderChips() {
+  const all = Object.values(CAT).flat().filter(s=>activeServices.has(s.id));
+  document.getElementById('cat-scroll').innerHTML = all.map((s,i)=>
+    `<div class="cat-chip ${i===0?'active':''}" data-cat="${s.id}" data-name="${s.name}" onclick="selectSvcCat(this)">
+      <span class="chip-icon">${s.icon}</span>${s.name}
+    </div>`
+  ).join('');
+  if (all.length){window._serviceCat=all[0].id;window._catLabel=all[0].name;}
+}
+
+function renderConfigPanel() {
+  Object.entries(CAT).forEach(([gid,items])=>{
+    document.getElementById(gid).innerHTML=items.map(s=>
+      `<div class="service-item ${activeServices.has(s.id)?'selected':''}" onclick="toggleSvc(this,'${s.id}')">
+        <span class="service-icon">${s.icon}</span>
+        <span class="service-name">${s.name}</span>
+        <div class="service-check"></div>
+      </div>`
+    ).join('');
+  });
+}
+
+function toggleSvc(el,id){el.classList.toggle('selected');activeServices.has(id)?activeServices.delete(id):activeServices.add(id);}
+function saveConfig(){renderChips();closePanel();}
+
+// ── Paneles ─────────────────────────────────────────────
+function openPanel(which) {
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById(`panel-${which}`).classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closePanel() {
+  document.getElementById('overlay').classList.remove('open');
+  document.querySelectorAll('.slide-panel').forEach(p=>p.classList.remove('open'));
+  document.body.style.overflow='';
+}
+
+// ── Panel reseña ────────────────────────────────────────
+function openReviewPanel() {
+  document.getElementById('review-place-name').textContent=window._currentPlaceName||'—';
+  document.getElementById('review-cat').textContent=window._catLabel||'';
+  window._currentRatingVal=0;
+  document.querySelectorAll('.star-btn').forEach(s=>s.classList.remove('active'));
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('panel-resena').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closeReviewPanel(){closePanel();}
+
+function setReviewRating(n) {
+  window._currentRatingVal=n;
+  document.querySelectorAll('.star-btn').forEach((s,i)=>s.classList.toggle('active',i<n));
+}
+
+// ── Toast ───────────────────────────────────────────────
+function showToast(msg) {
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),3000);
+}
+
+// ── Mode / categorías ───────────────────────────────────
+function setMode(m) {
+  window._modo=m;
+  document.getElementById('tab-services').classList.toggle('active',m==='services');
+  document.getElementById('tab-articles').classList.toggle('active',m==='articles');
+  document.getElementById('services-section').classList.toggle('visible',m==='services');
+  document.getElementById('articles-section').classList.toggle('visible',m==='articles');
+  document.getElementById('results').classList.remove('visible');
+}
+function selectSvcCat(el){document.querySelectorAll('#cat-scroll .cat-chip').forEach(c=>c.classList.remove('active'));el.classList.add('active');window._serviceCat=el.dataset.cat;window._catLabel=el.dataset.name;}
+function selectArtCat(el){document.querySelectorAll('#art-cat-scroll .cat-chip').forEach(c=>c.classList.remove('active'));el.classList.add('active');window._artCat=el.dataset.cat;window._artCatLabel=el.dataset.name;}
+
+// ── Destino ─────────────────────────────────────────────
+function toggleDestInput(){const w=document.getElementById('dest-input-wrap');w.style.display=w.style.display==='block'?'none':'block';if(w.style.display==='block')document.getElementById('dest-input').focus();}
+function confirmDest(v){if(!v.trim())return;document.getElementById('loc-dest-val').innerHTML=`<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>${v.trim().substring(0,18)}`;document.getElementById('loc-dest').classList.add('active');document.getElementById('dest-input-wrap').style.display='none';}
+
+// ── Compartir ───────────────────────────────────────────
+function compartir(){const n=document.getElementById('best-name').textContent;if(navigator.share){navigator.share({title:'Enplan',text:`Te recomiendo: ${n}`,url:window.location.href});}else{navigator.clipboard.writeText(window.location.href);showToast('Enlace copiado 📋');}}
+
+// ── Init ────────────────────────────────────────────────
+renderChips();
+renderConfigPanel();
+</script>
+</body>
+</html>
