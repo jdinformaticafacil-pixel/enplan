@@ -550,7 +550,7 @@ function renderGasolineras(items, radioM) {
     const preciosAlt = [];
     if (item.precio95)     preciosAlt.push('G95: '+item.precio95.toFixed(3)+'€');
     if (item.precio98)     preciosAlt.push('G98: '+item.precio98.toFixed(3)+'€');
-    if (item.precioDiesel) preciosAlt.push('GA: '+item.precioDiesel.toFixed(3)+'€');
+    if (item.precioDiesel) preciosAlt.push('Diésel: '+item.precioDiesel.toFixed(3)+'€');
     document.getElementById('alt'+i+'-v1').innerHTML =
       preciosAlt.length
         ? preciosAlt.map(p=>`<span style="display:block;font-size:11px;font-weight:500">${p}</span>`).join('')
