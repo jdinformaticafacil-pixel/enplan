@@ -365,6 +365,201 @@ function showResults() {
   setTimeout(()=>r.scrollIntoView({behavior:'smooth',block:'start'}),100);
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+//  API GASOLINERAS — Ministerio de Industria España
+//  Endpoint público, sin API key, precios actualizados diariamente
+//  Documentación: https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/help
+// ══════════════════════════════════════════════════════════════════
+
+const GAS_API = 'https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/';
+
+// Cache en memoria — evita repetir la llamada en la misma sesión (30 min TTL)
+let _gasCache = null;
+let _gasCacheTime = 0;
+const GAS_CACHE_MS = 30 * 60 * 1000;
+
+async function fetchGasolineras() {
+  if (_gasCache && (Date.now() - _gasCacheTime) < GAS_CACHE_MS) return _gasCache;
+  try {
+    const resp = await fetch(GAS_API);
+    const data = await resp.json();
+    _gasCache = data.ListaEESSPrecio || [];
+    _gasCacheTime = Date.now();
+    return _gasCache;
+  } catch(e) {
+    console.error('Error API gasolineras:', e);
+    return [];
+  }
+}
+
+// Convierte string precio español "1,559" a float 1.559
+function parsePrecio(str) {
+  if (!str || str.trim() === '') return null;
+  const v = parseFloat(str.replace(',', '.'));
+  return isNaN(v) ? null : v;
+}
+
+async function buscarGasolineras(uLat, uLng, radioM) {
+  const todas = await fetchGasolineras();
+  const W = getWeights();
+  const totalPeso = Object.values(W).reduce((a,b)=>a+b,0) || 1;
+  const candidatas = [];
+
+  for (const g of todas) {
+    const lat = parseFloat((g['Latitud']||'').replace(',','.'));
+    const lng = parseFloat((g['Longitud (WGS84)']||g['Longitud']||'').replace(',','.'));
+    if (!lat || !lng) continue;
+
+    const distM = haversine(uLat, uLng, lat, lng);
+    if (distM > radioM) continue;
+
+    // Precios de todos los combustibles disponibles
+    const p95    = parsePrecio(g['Precio Gasolina 95 E5']);
+    const diesel  = parsePrecio(g['Precio Gasoleo A']);
+    const p98    = parsePrecio(g['Precio Gasolina 98 E5']);
+    const glp    = parsePrecio(g['Precio Gases licuados del petróleo']);
+    const pHidro = parsePrecio(g['Precio Hidrogeno']);
+
+    // Precio de referencia para el scoring (G95 o diésel)
+    const precioRef = p95 || diesel || 9.99;
+
+    // Puntuaciones
+    const pDist  = Math.max(0, 100 - (distM/radioM)*100);
+    // Normalizar precio: 1.40€ = 100pts, 1.90€ = 0pts
+    const pPrice = p95 || diesel
+      ? Math.max(0, Math.min(100, (1.90 - precioRef) / 0.50 * 100))
+      : 50;
+    const pMarca = g['Rotulo'] || g['Rótulo'] ? 70 : 50;
+
+    const score = Math.round((
+      pDist  * W.distancia +
+      pPrice * W.precio    +
+      pMarca * W.calidad
+    ) / totalPeso);
+
+    const rotulo = g['Rotulo'] || g['Rótulo'] || 'Gasolinera';
+    const municipio = g['Municipio'] || g['Localidad'] || '';
+
+    candidatas.push({
+      name:         rotulo,
+      category:     'gas',
+      categoryLabel:'Gasolinera',
+      brand:        rotulo,
+      address:      (g['Dirección'] || g['Direccion'] || '') + (municipio ? ', ' + municipio : ''),
+      ciudad:       municipio,
+      lat, lng,
+      precio95:     p95,
+      precioDiesel: diesel,
+      precio98:     p98,
+      precioGLP:    glp,
+      precioHidro:  pHidro,
+      precioRef,
+      hours:        g['Horario'] || '',
+      _distM:       Math.round(distM),
+      _score:       score,
+      _isOpen:      isOpenNow(g['Horario'] || ''),
+      _bd: { distancia: Math.round(pDist), calidad: Math.round(pMarca), precio: Math.round(pPrice), resenas: 0, abierto: 0 },
+      _isGas:       true,
+    });
+  }
+
+  candidatas.sort((a,b) => b._score - a._score);
+  return candidatas.slice(0, 3);
+}
+
+// ── Render gasolineras ────────────────────────────────────────────
+function renderGasolineras(items, radioM) {
+  document.getElementById('art-empty').style.display = 'none';
+  if (!items.length) {
+    document.getElementById('results-heading').innerHTML = 'Sin gasolineras <em>cercanas</em>';
+    document.getElementById('results-sub').textContent = 'Aumenta el radio de búsqueda';
+    document.getElementById('card-best').style.display = 'none';
+    document.getElementById('alts-grid').style.display = 'none';
+    showResults(); return;
+  }
+  document.getElementById('card-best').style.display = 'block';
+  document.getElementById('alts-grid').style.display = 'grid';
+  document.getElementById('results-heading').innerHTML = 'La mejor <em>gasolinera</em>';
+  document.getElementById('results-sub').textContent = 'Precios hoy · ' + (radioM>=1000?(radioM/1000).toFixed(1)+'km':radioM+'m');
+
+  const best = items[0];
+  window._currentPlaceId   = 'gas_' + best.lat + '_' + best.lng;
+  window._currentPlaceName = best.name;
+  window._currentCity      = best.ciudad;
+
+  document.getElementById('score-num').textContent = best._score;
+  document.getElementById('best-name').textContent  = best.name;
+  document.getElementById('best-type').textContent  = '⛽ Estación de servicio · ' + best.ciudad;
+  document.getElementById('best-stars').textContent = '—';
+  document.getElementById('best-dist').textContent  = best._distM>=1000?(best._distM/1000).toFixed(1)+' km':best._distM+' m';
+  document.getElementById('best-reviews').textContent = '—';
+  document.getElementById('best-address').textContent = '📍 ' + best.address;
+
+  const isOpen = best._isOpen;
+  document.getElementById('best-horario').innerHTML = best.hours
+    ? (isOpen===true  ? '<div class="dot green"></div> Abierto · ' + best.hours
+      :isOpen===false ? '<div class="dot red"></div> Cerrado · '   + best.hours
+      :'<div class="dot orange"></div> ' + best.hours)
+    : '<div class="dot orange"></div> Horario no disponible';
+  document.getElementById('best-tel').style.display = 'none';
+  document.getElementById('best-web').style.display = 'none';
+
+  // Precios — bloque destacado
+  const prEl = document.getElementById('best-precio');
+  const precios = [];
+  if (best.precio95)     precios.push({ label:'Gasolina 95', val: best.precio95 });
+  if (best.precioDiesel) precios.push({ label:'Diésel A',    val: best.precioDiesel });
+  if (best.precio98)     precios.push({ label:'Gasolina 98', val: best.precio98 });
+  if (best.precioGLP)    precios.push({ label:'GLP',         val: best.precioGLP });
+  if (best.precioHidro)  precios.push({ label:'Hidrógeno',   val: best.precioHidro });
+
+  prEl.style.cssText = 'display:flex;flex-direction:column;gap:4px;padding:10px 14px;margin-bottom:12px;';
+  prEl.innerHTML = precios.length
+    ? precios.map(p =>
+        `<span style="display:flex;justify-content:space-between;font-size:13px;">
+          <span style="color:#6b6560">${p.label}</span>
+          <span style="font-weight:600;color:#1e3a5f">${p.val.toFixed(3)} €/L</span>
+        </span>`
+      ).join('')
+    : '<span style="font-size:12px;color:#a8a09a">Precios no disponibles</span>';
+
+  // Tags automáticos según precios
+  const tags = [];
+  if (best.precio95    && best.precio95    < 1.55) tags.push('Precio bajo G95');
+  if (best.precioDiesel && best.precioDiesel < 1.50) tags.push('Precio bajo diésel');
+  if (best.precioGLP)   tags.push('GLP disponible');
+  if (best.precio98)    tags.push('Gasolina 98');
+  if (best.precioHidro) tags.push('Hidrógeno');
+  document.getElementById('best-tags').innerHTML = tags.map(t=>`<span class="tag-p">${t}</span>`).join('');
+
+  document.getElementById('btn-main-action').href =
+    'https://www.openstreetmap.org/?mlat=' + best.lat + '&mlon=' + best.lng + '&zoom=18';
+  document.getElementById('btn-main-action').textContent = 'Ver en mapa';
+
+  animarBarras(best._bd);
+
+  // Alternativas
+  [1,2].forEach(i => {
+    const item = items[i];
+    if (!item) { document.getElementById('alt'+i+'-name').textContent='—'; document.getElementById('alt'+i+'-type').textContent='Sin más resultados'; return; }
+    document.getElementById('alt'+i+'-name').textContent  = item.name;
+    document.getElementById('alt'+i+'-type').textContent  = item.ciudad;
+    document.getElementById('alt'+i+'-score').textContent = item._score;
+    const pRef = item.precio95 || item.precioDiesel;
+    document.getElementById('alt'+i+'-v1').textContent = pRef ? pRef.toFixed(3)+'€' : '—';
+    document.getElementById('alt'+i+'-l1').textContent = item.precio95 ? 'G95/L' : 'Diésel/L';
+    document.getElementById('alt'+i+'-v2').textContent = item._distM>=1000?(item._distM/1000).toFixed(1)+' km':item._distM+' m';
+    document.getElementById('alt'+i+'-l2').textContent = 'Distancia';
+    const io = item._isOpen;
+    document.getElementById('alt'+i+'-open').innerHTML = io===true
+      ? '<div class="dot green"></div> Abierto'
+      : io===false ? '<div class="dot red"></div> Cerrado' : '<div class="dot orange"></div> —';
+  });
+
+  showResults();
+}
+
 // ══════════════════════════════════════════════════════════
 //  BÚSQUEDA PRINCIPAL
 // ══════════════════════════════════════════════════════════
@@ -381,8 +576,16 @@ window.doSearch = async function() {
       } catch { uLat=41.5628; uLng=2.0089; }
     }
     if (window._modo==='services') {
-      const items=await buscarLugares(window._serviceCat||'restaurant',uLat,uLng,window._radius||1000);
-      renderLugares(items,window._radius||1000);
+      const cat=window._serviceCat||'restaurant';
+      const radioM=window._radius||1000;
+      // Gasolineras usan API del Ministerio en tiempo real (sin Firestore)
+      if (cat==='gas') {
+        const items=await buscarGasolineras(uLat,uLng,radioM);
+        renderGasolineras(items,radioM);
+      } else {
+        const items=await buscarLugares(cat,uLat,uLng,radioM);
+        renderLugares(items,radioM);
+      }
     } else {
       const texto=document.getElementById('product-input')?.value||'';
       const artRad=parseInt(document.getElementById('art-radius')?.value||20000);
