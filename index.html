@@ -156,7 +156,13 @@ async function buscarLugares(cat, uLat, uLng, radioM) {
 }
 
 async function buscarArticulos(cat, uLat, uLng, radioM, texto) {
-  const snap=await getDocs(query(collection(db,'articles'),where('category','==',cat)));
+  let snap;
+  try {
+    snap = await getDocs(query(collection(db,'articles'),where('category','==',cat)));
+  } catch(e) {
+    console.warn('Colección articles no disponible:', e);
+    return []; // devolver vacío en lugar de lanzar error
+  }
   const res=[];
   snap.forEach(d=>{const r=calcScoreArt(d.data(),uLat,uLng,radioM,texto);if(r)res.push(r);});
   return res.sort((a,b)=>b._score-a._score).slice(0,3);
@@ -600,36 +606,92 @@ window.doSearch = async function() {
       renderArticulos(items);
     }
   } catch(e) {
-    console.error(e); alert('Error al buscar. Comprueba tu conexión.');
+    console.error('Error búsqueda:', e);
+    if (window._modo === 'articles') {
+      // Colección articles vacía o inexistente — mostrar aviso amigable
+      document.getElementById('results-heading').innerHTML = 'Próximamente <em>disponible</em>';
+      document.getElementById('results-sub').textContent = 'Base de datos de artículos en construcción';
+      document.getElementById('card-best').style.display = 'none';
+      document.getElementById('alts-grid').style.display = 'none';
+      document.getElementById('art-empty').style.display = 'block';
+      document.getElementById('results').classList.add('visible');
+      setTimeout(()=>document.getElementById('results').scrollIntoView({behavior:'smooth',block:'start'}),100);
+    } else {
+      alert('Error al buscar. Comprueba tu conexión.');
+    }
   } finally {
     btn.classList.remove('loading'); btn.innerHTML='Encontrar el mejor';
   }
 };
 
 // ── GPS al cargar ───────────────────────────────────────────
+// ── Precisión mínima aceptable en metros ─────────────────────────
+// Si la precisión es peor que esto, pedimos confirmación manual
+const GPS_PRECISION_MAX = 2000;
+
 window.addEventListener('load',()=>{
-  if (!navigator.geolocation) return;
+  if (!navigator.geolocation) { showManualInput('Tu navegador no soporta GPS'); return; }
+
   navigator.geolocation.getCurrentPosition(async pos=>{
-    window._userLat=pos.coords.latitude; window._userLng=pos.coords.longitude;
-    try {
-      const r=await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${pos.coords.latitude}&lon=${pos.coords.longitude}&format=json&accept-language=es`);
-      const d=await r.json();
-      const zona=d.address?.suburb||d.address?.neighbourhood||d.address?.city_district||'';
-      const ciudad=d.address?.city||d.address?.town||'';
-      const linea2=zona&&zona!==ciudad?zona+', '+ciudad:ciudad;
-      document.getElementById('loc-current-val').innerHTML=
-        `<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>
-        <span style="display:flex;flex-direction:column;line-height:1.3"><span>Mi ubicación</span><span style="font-size:10px;font-weight:300;color:#8a6e3a">${linea2}</span></span>`;
-    } catch {
-      document.getElementById('loc-current-val').innerHTML=
-        `<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> Mi ubicación`;
+    const accuracy = pos.coords.accuracy; // precisión en metros
+    const lat = pos.coords.latitude;
+    const lng = pos.coords.longitude;
+
+    // Si la precisión es muy mala (IP geolocation) — pedir ubicación manual
+    if (accuracy > GPS_PRECISION_MAX) {
+      console.warn('GPS poco preciso:', accuracy, 'm — posiblemente ubicación por IP');
+      showManualInput('Ubicación poco precisa (' + Math.round(accuracy/1000) + 'km). Escribe tu ciudad:');
+      return;
     }
-  },()=>{
-    document.getElementById('loc-current-val').innerHTML=
-      `<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#a8a09a" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#a8a09a" stroke-width="1.5" fill="none"/></svg>
-      <span style="display:flex;flex-direction:column;line-height:1.3"><span>Ubicación aprox.</span><span style="font-size:10px;color:#a8a09a">Activa el GPS para más precisión</span></span>`;
-  },{timeout:10000,enableHighAccuracy:true});
+
+    // GPS preciso — guardar y mostrar
+    window._userLat = lat;
+    window._userLng = lng;
+
+    try {
+      const r = await fetch('https://nominatim.openstreetmap.org/reverse?lat='+lat+'&lon='+lng+'&format=json&accept-language=es');
+      const d = await r.json();
+      const zona   = d.address?.suburb||d.address?.neighbourhood||d.address?.city_district||'';
+      const ciudad = d.address?.city||d.address?.town||'';
+      const linea2 = zona&&zona!==ciudad ? zona+', '+ciudad : ciudad;
+      document.getElementById('loc-current-val').innerHTML =
+        '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>'
+        + '<span style="display:flex;flex-direction:column;line-height:1.3"><span>Mi ubicación</span>'
+        + '<span style="font-size:10px;font-weight:300;color:#8a6e3a">'+linea2+'</span></span>';
+    } catch {
+      document.getElementById('loc-current-val').innerHTML =
+        '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> Mi ubicación';
+    }
+  },
+  ()=>{ showManualInput('No se pudo detectar el GPS. Escribe tu ciudad:'); },
+  {timeout:10000, enableHighAccuracy:true}
+  );
 });
+
+// ── Input manual de ubicación ─────────────────────────────────────
+function showManualInput(mensaje) {
+  const locCard = document.getElementById('loc-current');
+  locCard.classList.remove('active');
+  document.getElementById('loc-current-val').innerHTML =
+    '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#a8a09a" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#a8a09a" stroke-width="1.5" fill="none"/></svg>'
+    + '<span style="display:flex;flex-direction:column;line-height:1.3"><span style="color:#a8a09a">GPS no disponible</span>'
+    + '<span style="font-size:10px;color:#c8a96e;cursor:pointer" onclick="openManualLocation()">Escribe tu ubicación →</span></span>';
+  // Mostrar automáticamente el input de ubicación manual
+  setTimeout(openManualLocation, 800);
+}
+
+function openManualLocation() {
+  const wrap = document.getElementById('dest-input-wrap');
+  wrap.style.display = 'block';
+  const input = document.getElementById('dest-input');
+  input.placeholder = 'Tu ciudad o dirección actual…';
+  input.focus();
+  // Cambiar comportamiento del input para que sea ubicación actual
+  input.dataset.mode = 'current';
+}
+
+// Sobrescribir confirmDest para manejar modo "ubicación actual"
+const _confirmDestOriginal = window.confirmDest;
 </script>
 
 <style>
@@ -1173,7 +1235,43 @@ function selectArtCat(el){document.querySelectorAll('#art-cat-scroll .cat-chip')
 
 // ── Destino ─────────────────────────────────────────────
 function toggleDestInput(){const w=document.getElementById('dest-input-wrap');w.style.display=w.style.display==='block'?'none':'block';if(w.style.display==='block')document.getElementById('dest-input').focus();}
-function confirmDest(v){if(!v.trim())return;document.getElementById('loc-dest-val').innerHTML=`<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>${v.trim().substring(0,18)}`;document.getElementById('loc-dest').classList.add('active');document.getElementById('dest-input-wrap').style.display='none';}
+async function confirmDest(v) {
+  if (!v.trim()) return;
+  const input = document.getElementById('dest-input');
+  const isCurrent = input.dataset.mode === 'current';
+
+  // Geocodificar el texto con Nominatim
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/search?q='+encodeURIComponent(v.trim()+', España')+'&format=json&limit=1&accept-language=es');
+    const d = await r.json();
+    if (d && d[0]) {
+      const lat = parseFloat(d[0].lat);
+      const lng = parseFloat(d[0].lon);
+      const ciudad = d[0].display_name.split(',')[0];
+      if (isCurrent) {
+        // Guardar como ubicación actual
+        window._userLat = lat;
+        window._userLng = lng;
+        document.getElementById('loc-current-val').innerHTML =
+          '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg>'
+          + '<span style="display:flex;flex-direction:column;line-height:1.3"><span>Mi ubicación</span>'
+          + '<span style="font-size:10px;font-weight:300;color:#8a6e3a">'+ciudad+'</span></span>';
+        document.getElementById('loc-current').classList.add('active');
+      } else {
+        // Guardar como destino
+        window._destLat = lat;
+        window._destLng = lng;
+        document.getElementById('loc-dest-val').innerHTML =
+          '<svg width="10" height="13" viewBox="0 0 10 13" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#c8a96e" stroke-width="1.5"/><path d="M5 13C5 13 1 8.5 1 5a4 4 0 0 1 8 0c0 3.5-4 8-4 8z" stroke="#c8a96e" stroke-width="1.5" fill="none"/></svg> '+ciudad.substring(0,18);
+        document.getElementById('loc-dest').classList.add('active');
+      }
+    }
+  } catch(e) {
+    console.error('Geocodificación fallida:', e);
+  }
+  input.dataset.mode = '';
+  document.getElementById('dest-input-wrap').style.display = 'none';
+}
 
 // ── Compartir ───────────────────────────────────────────
 function compartir(){const n=document.getElementById('best-name').textContent;if(navigator.share){navigator.share({title:'Enplan',text:`Te recomiendo: ${n}`,url:window.location.href});}else{navigator.clipboard.writeText(window.location.href);showToast('Enlace copiado 📋');}}
