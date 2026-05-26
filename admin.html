@@ -679,11 +679,13 @@ tr.row-inactive td{opacity:0.5}
   <div class="login-card">
     <div class="login-logo">En<span>plan</span></div>
     <div class="login-sub">Panel de administración</div>
+    <form onsubmit="event.preventDefault();doLogin()" autocomplete="on">
     <label class="login-label">Email</label>
-    <input class="login-input" id="login-email" type="email" placeholder="admin@enplan.app" onkeydown="loginKeydown(event)">
+    <input class="login-input" id="login-email" type="email" placeholder="admin@enplan.app" onkeydown="loginKeydown(event)" autocomplete="username">
     <label class="login-label">Contraseña</label>
-    <input class="login-input" id="login-pass" type="password" placeholder="••••••••" onkeydown="loginKeydown(event)">
-    <button class="login-btn" id="login-btn" onclick="doLogin()">Acceder</button>
+    <input class="login-input" id="login-pass" type="password" placeholder="••••••••" onkeydown="loginKeydown(event)" autocomplete="current-password">
+    <button class="login-btn" id="login-btn" type="submit">Acceder</button>
+    </form>
     <div class="login-error" id="login-error"></div>
   </div>
 </div>
