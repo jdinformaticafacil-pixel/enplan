@@ -88,6 +88,20 @@ window.loginKeydown = function(e) {
 //  ESTADÍSTICAS
 // ══════════════════════════════════════════════════════════════
 
+
+const CAT_LABELS = {
+  restaurant:'Restaurante', cafe:'Cafetería', bar:'Bar', bakery:'Panadería',
+  fast_food:'Comida rápida', ice_cream:'Heladería', pharmacy:'Farmacia',
+  hospital:'Centro médico', dentist:'Dentista', gym:'Gimnasio', pool:'Piscina',
+  yoga:'Yoga / Pilates', cinema:'Cine', theater:'Teatro', nightclub:'Discoteca',
+  library:'Biblioteca', university:'Universidad', school:'Colegio',
+  gas:'Gasolinera', hotel:'Hotel', bank:'Banco / ATM', parking:'Aparcamiento',
+  supermarket:'Supermercado', clothing:'Tienda de ropa',
+  electronics_shop:'Electrónica', bookshop:'Librería',
+  pet_shop:'Mascotas', florist:'Floristería',
+};
+function catLabel(id) { return CAT_LABELS[id] || id; }
+
 async function loadStats() {
   try {
     // Total lugares
@@ -120,7 +134,7 @@ async function loadStats() {
     document.getElementById('stats-cats').innerHTML = topCats
       .map(([cat,n]) => `
         <div class="stat-bar-row">
-          <span class="stat-bar-label">${cat}</span>
+          <span class="stat-bar-label">${catLabel(cat)}</span>
           <div class="stat-bar-track">
             <div class="stat-bar-fill" style="width:${Math.min(100,(n/topCats[0][1])*100)}%"></div>
           </div>
@@ -183,7 +197,7 @@ function renderPlacesTable(places) {
         <div class="place-name-cell">${p.name||'—'}</div>
         <div class="place-sub-cell">${p.osmId||''}</div>
       </td>
-      <td><span class="cat-badge">${p.category||'—'}</span></td>
+      <td><span class="cat-badge">${catLabel(p.category)||'—'}</span></td>
       <td>${p.ciudad||'—'}</td>
       <td class="td-rating">${p.rating ? '★ '+p.rating : '—'}</td>
       <td class="td-coords">${p.lat?.toFixed(4)||'—'}, ${p.lng?.toFixed(4)||'—'}</td>
@@ -763,16 +777,29 @@ tr.row-inactive td{opacity:0.5}
             <option value="cafe">Cafetería</option>
             <option value="bakery">Panadería</option>
             <option value="bar">Bar</option>
+            <option value="fast_food">Comida rápida</option>
+            <option value="ice_cream">Heladería</option>
             <option value="pharmacy">Farmacia</option>
-            <option value="supermarket">Supermercado</option>
-            <option value="gym">Gimnasio</option>
-            <option value="hotel">Hotel</option>
-            <option value="gas">Gasolinera</option>
-            <option value="library">Biblioteca</option>
             <option value="hospital">Centro médico</option>
-            <option value="clothing">Tienda de ropa</option>
+            <option value="dentist">Dentista</option>
+            <option value="gym">Gimnasio</option>
+            <option value="pool">Piscina</option>
+            <option value="yoga">Yoga / Pilates</option>
+            <option value="cinema">Cine</option>
+            <option value="theater">Teatro</option>
+            <option value="nightclub">Discoteca</option>
+            <option value="library">Biblioteca</option>
+            <option value="university">Universidad</option>
+            <option value="gas">Gasolinera</option>
+            <option value="hotel">Hotel</option>
             <option value="bank">Banco / ATM</option>
             <option value="parking">Aparcamiento</option>
+            <option value="supermarket">Supermercado</option>
+            <option value="clothing">Tienda de ropa</option>
+            <option value="electronics_shop">Electrónica</option>
+            <option value="bookshop">Librería</option>
+            <option value="pet_shop">Mascotas</option>
+            <option value="florist">Floristería</option>
           </select>
           <select class="filter-select" id="filter-status" onchange="filterPlaces()">
             <option value="">Todos los estados</option>
