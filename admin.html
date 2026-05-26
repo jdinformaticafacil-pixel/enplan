@@ -529,6 +529,34 @@ window.showToast = function(msg, type='success') {
   setTimeout(() => t.classList.remove('show'), 3500);
 };
 
+// Activar todos los lugares de golpe
+window.activateAll = async function() {
+  if (!confirm('¿Activar todos los lugares inactivos o sin estado? Esto puede tardar unos segundos.')) return;
+  const btn = document.querySelector('[onclick="activateAll()"]');
+  btn.disabled = true; btn.textContent = '⏳ Activando…';
+
+  try {
+    // Buscar todos los que no tienen active=true
+    const inactivos = _allPlaces.filter(p => !p.active);
+    let count = 0;
+
+    for (const p of inactivos) {
+      await updateDoc(doc(db, 'places', p._id), { active: true });
+      p.active = true;
+      count++;
+    }
+
+    filterPlaces();
+    loadStats();
+    showToast(`✅ ${count} lugares activados correctamente`);
+  } catch(e) {
+    console.error(e);
+    showToast('Error al activar lugares', 'error');
+  }
+
+  btn.disabled = false; btn.textContent = '⚡ Activar todos';
+};
+
 // Recargar lugares
 window.reloadPlaces = function() { loadPlaces(); loadStats(); };
 </script>
@@ -811,6 +839,7 @@ tr.row-inactive td{opacity:0.5}
           <button class="btn-sm btn-secondary" onclick="resetFilters()">Limpiar</button>
           <div class="toolbar-right">
             <span class="places-count" id="places-count">—</span>
+            <button class="btn-sm btn-secondary" onclick="activateAll()" title="Activa todos los lugares inactivos o sin campo active">⚡ Activar todos</button>
             <button class="btn-sm btn-primary" onclick="reloadPlaces()">↻ Recargar</button>
           </div>
         </div>
