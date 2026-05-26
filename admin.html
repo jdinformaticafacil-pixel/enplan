@@ -400,7 +400,7 @@ function renderReviews(reviews) {
       <div class="review-header">
         <div>
           <div class="review-place">${r.placeName||'—'}</div>
-          <div class="review-meta">${r.categoria||''} · ${r.ciudad||''} · ${r.userId||'anon'}</div>
+          <div class="review-meta">${catLabel(r.categoria||'')||r.categoria||''} · ${r.ciudad||''} · ${r.userId||'anon'}</div>
         </div>
         <div class="review-rating">${'★'.repeat(r.rating||0)}${'☆'.repeat(5-(r.rating||0))}</div>
       </div>
@@ -594,7 +594,7 @@ body{background:var(--off);color:var(--text);font-family:'Outfit',sans-serif;fon
 
 /* Sidebar */
 .admin-layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
-.sidebar{background:#1e3a5f;color:white;padding:24px 0;display:flex;flex-direction:column}
+.sidebar{background:#1e3a5f;color:white;padding:24px 0;display:flex;flex-direction:column;height:100vh;position:sticky;top:0;overflow:hidden}
 .sidebar-logo{padding:0 20px 24px;border-bottom:1px solid rgba(255,255,255,0.1);margin-bottom:16px}
 .sidebar-logo .logo-title{font-size:20px;font-weight:600}
 .sidebar-logo .logo-title span{color:var(--gold);font-style:italic}
